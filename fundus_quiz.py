@@ -39,15 +39,17 @@ LOCAL_LABELS_FALLBACK = "RFMiD_Training_Labels.csv"
 # ===================== STREAMLIT PAGE CONFIG =====================
 st.set_page_config(page_title="Fundus Pathology Quiz", layout="wide")
 
-# Disable fade/animations globally
+# Disable fade/animations globally and style the Begin button only
 st.markdown(
     """
     <style>
       * { transition: none !important; animation: none !important; }
-      .st-emotion-cache-1avcm0n, .st-emotion-cache-1y4p8pa { animation: none !important; } /* common fade-in classes */
-      .stButton > button { margin-top: 8px; }
-      /* tighten logos row */
-      .logo-row { display: flex; align-items: center; gap: 24px; }
+      /* larger "Begin Quiz" only when wrapped in .begin-btn */
+      .begin-btn .stButton > button {
+        font-size: 1.05rem;
+        padding: 0.75rem 1.2rem;
+        border-radius: 10px;
+      }
     </style>
     """,
     unsafe_allow_html=True,
@@ -295,18 +297,22 @@ annotated through adjudicated consensus of two senior retinal experts.
 """
     )
 
-    # Row: small hero image + Start button beside it
-    col_img, col_btn = st.columns([3, 1])
-    with col_img:
-        hero_url = get_hero_image_url()
-        if hero_url:
-            st.image(hero_url, width=320)
-    with col_btn:
-        st.write("")  # spacer
-        st.write("")
-        if st.button("Start Quiz", type="primary"):
+    # Sample image with "Begin Quiz" right below it (bigger button)
+    hero_url = get_hero_image_url()
+    if hero_url:
+        st.image(hero_url, width=340)
+        st.markdown('<div class="begin-btn">', unsafe_allow_html=True)
+        if st.button("Begin Quiz", type="primary", key="begin_quiz"):
             st.session_state.quiz_started = True
             st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
+    else:
+        # Fallback: still show the button if image missing
+        st.markdown('<div class="begin-btn">', unsafe_allow_html=True)
+        if st.button("Begin Quiz", type="primary", key="begin_quiz_fallback"):
+            st.session_state.quiz_started = True
+            st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown("### Credits & Reference")
     st.markdown(
@@ -320,18 +326,18 @@ This quiz uses the **Retinal Fundus Multi-Disease Image Dataset (RFMiD)**.
 """
     )
 
-    # Logos row, kept separate, no captions, no overlap
-    col_logo1, spacer, col_logo2 = st.columns([1, 0.1, 1])
-    with col_logo1:
-        st.image(
-            "https://designguide.ku.dk/download/co-branding/ku_logo_uk_h.png",
-            width=180,
-        )
-    with col_logo2:
-        st.image(
-            "https://www.regionh.dk/til-fagfolk/Om-Region-H/regionens-design/logo-og-grundelementer/logo-til-print-og-web/PublishingImages/Maerke_Hospital.jpg",
-            width=120,
-        )
+    # Logos: tighter row, no captions, custom heights, small gap
+    st.markdown(
+        """
+        <div style="display:flex; align-items:center; gap:10px; margin-top:6px;">
+            <img src="https://designguide.ku.dk/download/co-branding/ku_logo_uk_h.png"
+                 alt="University of Copenhagen" style="height:40px;">
+            <img src="https://www.regionh.dk/til-fagfolk/Om-Region-H/regionens-design/logo-og-grundelementer/logo-til-print-og-web/PublishingImages/Hospital_Maerke_RGB_A1_str.png"
+                 alt="The Capital Region of Denmark (Copenhagen University Hospital)" style="height:34px;">
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     st.markdown("---")
 

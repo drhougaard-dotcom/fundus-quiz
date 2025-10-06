@@ -39,6 +39,20 @@ LOCAL_LABELS_FALLBACK = "RFMiD_Training_Labels.csv"
 # ===================== STREAMLIT PAGE CONFIG =====================
 st.set_page_config(page_title="Fundus Pathology Quiz", layout="wide")
 
+# Disable fade/animations globally
+st.markdown(
+    """
+    <style>
+      * { transition: none !important; animation: none !important; }
+      .st-emotion-cache-1avcm0n, .st-emotion-cache-1y4p8pa { animation: none !important; } /* common fade-in classes */
+      .stButton > button { margin-top: 8px; }
+      /* tighten logos row */
+      .logo-row { display: flex; align-items: center; gap: 24px; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 # ===================== HELPERS =====================
 def normalize_id(any_id) -> str:
     """Drop leading zeros from numeric IDs."""
@@ -281,10 +295,18 @@ annotated through adjudicated consensus of two senior retinal experts.
 """
     )
 
-    # Small hero fundus image (from your S3)
-    hero_url = get_hero_image_url()
-    if hero_url:
-        st.image(hero_url, caption="Sample fundus image (RFMiD)", width=320)
+    # Row: small hero image + Start button beside it
+    col_img, col_btn = st.columns([3, 1])
+    with col_img:
+        hero_url = get_hero_image_url()
+        if hero_url:
+            st.image(hero_url, width=320)
+    with col_btn:
+        st.write("")  # spacer
+        st.write("")
+        if st.button("Start Quiz", type="primary"):
+            st.session_state.quiz_started = True
+            st.rerun()
 
     st.markdown("### Credits & Reference")
     st.markdown(
@@ -298,26 +320,20 @@ This quiz uses the **Retinal Fundus Multi-Disease Image Dataset (RFMiD)**.
 """
     )
 
-    # Compact logos side-by-side, Capital Region smaller & closer
-    # Use tight columns to reduce spacing between the two logos
-    col_logo1, col_logo2, _spacer = st.columns([1, 0.8, 8])
+    # Logos row, kept separate, no captions, no overlap
+    col_logo1, spacer, col_logo2 = st.columns([1, 0.1, 1])
     with col_logo1:
         st.image(
             "https://designguide.ku.dk/download/co-branding/ku_logo_uk_h.png",
-            caption="University of Copenhagen",
             width=180,
         )
     with col_logo2:
         st.image(
             "https://www.regionh.dk/til-fagfolk/Om-Region-H/regionens-design/logo-og-grundelementer/logo-til-print-og-web/PublishingImages/Maerke_Hospital.jpg",
-            caption="The Capital Region of Denmark\n(Copenhagen University Hospital)",
             width=120,
         )
 
     st.markdown("---")
-    if st.button("Start Quiz"):
-        st.session_state.quiz_started = True
-        st.rerun()  # jump straight into the quiz
 
 def show_quiz():
     # ----- Always use ALL datasets combined -----

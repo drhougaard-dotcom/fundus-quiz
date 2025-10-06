@@ -76,6 +76,25 @@ def fetch_png(url: str) -> io.BytesIO:
 def current_filter_signature(selected_categories, include_normals, mc_mode, num_choices):
     return (tuple(sorted(selected_categories)), include_normals, mc_mode, num_choices)
 
+def build_mc_options(image_id: str, correct_codes: List[str], selected_codes: List[str], num_choices: int) -> List[str]:
+    """
+    Build a deterministic set of MC option codes for the given image.
+    Deterministic per (image_id, num_choices, selected_codes) so the widget doesn't reset on rerun.
+    Includes ALL correct codes; then fills with distractors up to num_choices (or more if many correct).
+    """
+    # deterministic RNG seed
+    seed_str = f"{normalize_id(image_id)}|{num_choices}|{','.join(sorted(selected_codes))}"
+    rng = random.Random(seed_str)
+
+    options = list(dict.fromkeys(correct_codes))  # keep order, de-dup
+    distractors = [c for c in selected_codes if c not in options]
+    need = max(0, num_choices - len(options))
+    if need > 0 and distractors:
+        options += rng.sample(distractors, min(need, len(distractors)))
+    # If there are more correct labels than num_choices, we still include them all.
+    # Sort by code for a stable order (keeps determinism).
+    return sorted(set(options))
+
 # ===================== LABEL MAPS =====================
 # Full RFMiD code → human label mapping
 label_map = {
@@ -289,20 +308,17 @@ def show_quiz():
 
     # ----- Modes -----
     if mc_mode:
-        # multi-label capable MC
-        option_pool = set(correct_codes)
-        distractor_pool = [c for c in selected_codes if c not in correct_codes]
-        need = max(0, num_choices - len(option_pool))
-        if need > 0 and distractor_pool:
-            option_pool.update(random.sample(distractor_pool, min(need, len(distractor_pool))))
-        options = sorted(option_pool)
+        # Deterministic, per-image MC options to avoid widget resetting on rerun
+        options_codes = build_mc_options(image_id, correct_codes, selected_codes, num_choices)
+        label_options = [label_map.get(c, c) for c in options_codes]
 
+        # Stable widget key per image so user selection persists
+        msel_key = f"msel_{image_id}_{num_choices}"
         st.write("Select **all** that apply, then press **Check**.")
-        label_options = [label_map.get(c, c) for c in options]
-        user_choice_labels = st.multiselect("Your selection:", label_options, default=[])
+        user_choice_labels = st.multiselect("Your selection:", label_options, default=[], key=msel_key)
 
         # Map back to codes for scoring
-        inv_map = {label_map.get(k, k): k for k in options}
+        inv_map = {label_map.get(k, k): k for k in options_codes}
         user_codes = sorted({inv_map[lbl] for lbl in user_choice_labels if lbl in inv_map})
 
         if st.button("Check"):

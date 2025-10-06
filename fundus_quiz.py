@@ -117,10 +117,7 @@ def render_answer_pills(codes: List[str]):
     st.markdown(f"**Correct answers:** {pills}", unsafe_allow_html=True)
 
 def get_hero_image_url() -> Optional[str]:
-    """
-    Try to show a nice fundus 'hero' image from your public S3.
-    Preference order: Training(1.png) → Evaluation(1.png) → Test(1.png).
-    """
+    """Try to show a small fundus 'hero' image from your public S3."""
     for prefix in [TRAIN_PREFIX, EVAL_PREFIX, TEST_PREFIX]:
         if prefix:
             return resolve_image_url(prefix, "1")
@@ -138,32 +135,22 @@ def _prepare_df(df_local: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
     Ensure numeric label columns, compute virtual NL, and num_pathologies.
     Returns (df, pathology_cols) where pathology_cols excludes ID, NL, and helper columns.
     """
-    # Columns that are *not* labels
     non_label_cols = {"ID", "NL", "num_pathologies", "dataset", "img_prefix"}
-
-    # Identify label columns (everything else)
     path_cols = [c for c in df_local.columns if c not in non_label_cols]
 
-    # Coerce label columns to numeric (0/1); treat anything non-numeric as 0
     if path_cols:
         df_local[path_cols] = (
             df_local[path_cols]
-            .apply(pd.to_numeric, errors="coerce")  # "0"/"1" -> 0/1; NaN if not numeric
+            .apply(pd.to_numeric, errors="coerce")  # "0"/"1" -> 0/1; NaN -> 0
             .fillna(0)
             .astype(int)
         )
 
-    # Compute num_pathologies across label columns (exclude NL)
     num_path = df_local[path_cols].sum(axis=1) if path_cols else pd.Series(0, index=df_local.index)
-
-    # Virtual NL if missing
     if "NL" not in df_local.columns:
         df_local["NL"] = (num_path == 0).astype(int)
-
-    # Save convenience column
     df_local["num_pathologies"] = num_path
 
-    # Return updated df and the final set of pathology cols (exclude helpers)
     final_path_cols = [c for c in df_local.columns if c not in non_label_cols]
     return df_local, final_path_cols
 
@@ -194,14 +181,11 @@ def load_all_datasets() -> Tuple[pd.DataFrame, List[str]]:
     if not dfs:
         raise FileNotFoundError("No dataset labels URLs are set in Secrets. Configure *_LABELS_CSV_URL.")
 
-    # Outer concat to align columns from different splits
     df_all = pd.concat(dfs, axis=0, ignore_index=True, sort=False)
 
-    # Determine which columns are labels (exclude known non-labels)
     non_label_cols = {"ID", "NL", "num_pathologies", "dataset", "img_prefix"}
     candidate_label_cols = [c for c in df_all.columns if c not in non_label_cols]
 
-    # Coerce candidate label columns to numeric 0/1 (before computing NL and sums)
     if candidate_label_cols:
         df_all[candidate_label_cols] = (
             df_all[candidate_label_cols]
@@ -210,7 +194,6 @@ def load_all_datasets() -> Tuple[pd.DataFrame, List[str]]:
             .astype(int)
         )
 
-    # Prepare (computes virtual NL + num_pathologies) and returns final pathology columns
     df_all, path_cols_final = _prepare_df(df_all)
     return df_all, path_cols_final
 
@@ -301,16 +284,16 @@ def show_intro():
         """
 **An online interactive quiz tool for fundus photo evaluation training.**
 
-This app lets you practice recognizing retinal pathologies on color fundus photographs using the RFMiD dataset.
-Choose a dataset split, select pathology categories, switch between **Multiple-choice** and **Flashcard** modes,
-or try the **Papilledema (yes/no)** binary quiz.
+This app lets you practice recognizing retinal pathologies on color fundus photographs using the RFMiD dataset,
+an open-access set of **3,200** fundus images captured using **three** different fundus cameras with **46** conditions
+annotated through adjudicated consensus of two senior retinal experts.
 """
     )
 
-    # Hero fundus image (from your S3) + quick CTA
+    # Small hero fundus image (from your S3)
     hero_url = get_hero_image_url()
     if hero_url:
-        st.image(hero_url, use_container_width=True, caption="Sample fundus image (RFMiD)")
+        st.image(hero_url, caption="Sample fundus image (RFMiD)", width=360)
 
     st.markdown("### Credits & Reference")
     st.markdown(
@@ -324,35 +307,29 @@ This quiz uses the **Retinal Fundus Multi-Disease Image Dataset (RFMiD)**.
 """
     )
 
-    # Logos side-by-side
+    # Small logos side-by-side
     col1, col2 = st.columns(2)
     with col1:
         st.image(
-            "https://designguide.ku.dk/billeder/samarb4_uk.jpg",
+            "https://cdn.imgbin.com/21/0/4/imgbin-university-of-copenhagen-faculty-of-health-and-medical-sciences-technical-university-of-denmark-copenhagen-business-school-student-wXtHuujc5LtcLsFJ6avSvz84K.jpg",
             caption="University of Copenhagen",
-            use_container_width=True,
+            width=220,
         )
     with col2:
         st.image(
             "https://www.regionh.dk/til-fagfolk/Om-Region-H/regionens-design/logo-og-grundelementer/logo-til-print-og-web/PublishingImages/Maerke_Hospital.jpg",
             caption="The Capital Region of Denmark (Copenhagen University Hospital)",
-            use_container_width=True,
+            width=220,
         )
 
     st.markdown("---")
     if st.button("Start Quiz"):
         st.session_state.quiz_started = True
-        st.rerun()  # <-- ensure immediate transition without needing a second click
+        st.rerun()  # jump straight into the quiz
 
 def show_quiz():
-    # ----- Sidebar: dataset selection -----
-    st.sidebar.header("Dataset")
-    dataset_choice = st.sidebar.selectbox("Choose dataset", ["Training", "Evaluation", "Test", "All"], index=0)
-
-    if dataset_choice == "All":
-        df, pathology_cols = load_all_datasets()
-    else:
-        df, img_prefix, pathology_cols = load_single_dataset(dataset_choice)
+    # ----- Always use ALL datasets combined -----
+    df, pathology_cols = load_all_datasets()
 
     # ----- Sidebar: quiz setup -----
     st.sidebar.header("Quiz setup")
@@ -388,10 +365,10 @@ def show_quiz():
         df_quiz = df[pool_mask].copy()
 
         if df_quiz.empty:
-            st.warning("No images found for Papilledema vs Normal in the selected dataset(s).")
+            st.warning("No images found for Papilledema vs Normal.")
             return
 
-        sig = current_filter_signature(dataset=dataset_choice, pap_mode=pap_mode)
+        sig = current_filter_signature(mode="pap")
         if "filter_signature" not in st.session_state or st.session_state.filter_signature != sig:
             st.session_state.filter_signature = sig
             st.session_state.current_index = random.choice(df_quiz.index)
@@ -403,25 +380,10 @@ def show_quiz():
             st.session_state.current_index = random.choice(df_quiz.index)
             st.session_state.revealed = False
 
-        # ----- Top bar -----
-        col_top1, col_top2, col_top3 = st.columns([1, 2, 1])
-        with col_top1:
-            if st.button("Next image"):
-                st.session_state.current_index = random.choice(df_quiz.index)
-                st.session_state.revealed = False
-        with col_top2:
-            st.write(f"**Dataset:** {dataset_choice}  |  **Papilledema vs Normal**  |  **Pool size:** {len(df_quiz)}")
-        with col_top3:
-            if st.button("Reset score"):
-                st.session_state.score = 0
-                st.session_state.attempts = 0
-
         # ----- Current item -----
         row = df_quiz.loc[st.session_state.current_index]
         image_id = normalize_id(row["ID"])
-        prefix = row["img_prefix"]  # always present
-        ds_name = row["dataset"]    # always present
-        image_url = resolve_image_url(prefix, image_id)
+        image_url = resolve_image_url(row["img_prefix"], image_id)
 
         try:
             buf = fetch_png(image_url)
@@ -430,19 +392,23 @@ def show_quiz():
             st.error(f"Failed to load image from S3 URL:\n{image_url}\n\n{e}")
             return
 
-        st.markdown(f"### 🖼️ {ds_name} • Image ID: `{image_id}`")
-        st.image(im, caption=f"{ds_name}: Papilledema — Yes or No?", use_container_width=True)
+        st.markdown(f"### 🖼️ Image ID: `{image_id}`")
+        st.image(im, caption="Papilledema — Yes or No?", use_container_width=True)
 
         # Ground truth for pap-mode
         is_pap = bool(row.get("ODE", 0) == 1)
         row_positive = [c for c in pathology_cols if row.get(c, 0) == 1]
         correct_codes_all = sorted(row_positive)
 
-        # Binary answer UI (unique key per dataset+id)
-        choice_key = f"pap_choice_{ds_name}_{image_id}"
+        # Binary answer UI (side-by-side with Next)
+        choice_key = f"pap_choice_{image_id}"
         user_choice = st.radio("Your answer:", ["Papilledema — Yes", "Papilledema — No"], index=None, key=choice_key)
 
-        if st.button("Check"):
+        colA, colB, colC = st.columns([1,1,2])
+        check_clicked = colA.button("Check", type="primary", key=f"check_pap_{image_id}")
+        next_clicked  = colB.button("Next image", key=f"next_pap_{image_id}")
+
+        if check_clicked:
             if user_choice is None:
                 st.warning("Please select Yes or No.")
             else:
@@ -455,12 +421,17 @@ def show_quiz():
                     st.error("Not quite.")
                 st.session_state.revealed = True
 
+        if next_clicked:
+            st.session_state.current_index = random.choice(df_quiz.index)
+            st.session_state.revealed = False
+            st.rerun()
+
         if st.session_state.revealed:
             render_answer_pills(correct_codes_all)
             st.info(f"**Score:** {st.session_state.score} / {st.session_state.attempts}")
         return
 
-    # ===== Normal multi-label modes (when pap_mode is OFF) =====
+    # ===== Normal multi-label / flashcard modes (pap_mode OFF) =====
     selected_codes = {code for cat in selected_categories for code in category_map.get(cat, [])}
     if include_normals:
         selected_codes.add("NL")
@@ -471,8 +442,6 @@ def show_quiz():
         return
 
     present_cols = [c for c in selected_codes if c in df.columns]
-
-    # Build quiz pool: rows with ≥1 selected label OR NL==1 if include_normals
     path_mask = (df[[c for c in present_cols if c != "NL"]].sum(axis=1) > 0) if present_cols else pd.Series(False, index=df.index)
     nl_mask = (df["NL"] == 1) if include_normals else pd.Series(False, index=df.index)
     pool_mask = path_mask | nl_mask
@@ -482,10 +451,8 @@ def show_quiz():
         st.warning("No images match the current selection. Try adding categories or enabling normals.")
         return
 
-    # ----- State reset if filters change -----
     sig = current_filter_signature(
-        dataset=dataset_choice,
-        pap_mode=False,
+        mode="multi",
         selected_categories=selected_categories,
         include_normals=include_normals,
         mc_mode=mc_mode,
@@ -502,28 +469,10 @@ def show_quiz():
         st.session_state.current_index = random.choice(df_quiz.index)
         st.session_state.revealed = False
 
-    # ----- Top bar -----
-    col_top1, col_top2, col_top3 = st.columns([1, 2, 1])
-    with col_top1:
-        if st.button("Next image"):
-            st.session_state.current_index = random.choice(df_quiz.index)
-            st.session_state.revealed = False
-    with col_top2:
-        ds_info = dataset_choice if dataset_choice != "All" else "All datasets"
-        cat_label = ', '.join(selected_categories) if selected_categories else '—'
-        st.write(f"**Dataset:** {ds_info}  |  **Pool size:** {len(df_quiz)}  |  **Categories:** {cat_label}"
-                 f"{'  |  + Normals' if include_normals else ''}")
-    with col_top3:
-        if st.button("Reset score"):
-            st.session_state.score = 0
-            st.session_state.attempts = 0
-
     # ----- Current item (S3 image load) -----
     row = df_quiz.loc[st.session_state.current_index]
     image_id = normalize_id(row["ID"])
-    prefix = row["img_prefix"]  # present in df from loaders
-    ds_name = row["dataset"]
-    image_url = resolve_image_url(prefix, image_id)
+    image_url = resolve_image_url(row["img_prefix"], image_id)
 
     try:
         buf = fetch_png(image_url)
@@ -532,28 +481,33 @@ def show_quiz():
         st.error(f"Failed to load image from S3 URL:\n{image_url}\n\n{e}")
         return
 
-    st.markdown(f"### 🖼️ {ds_name} • Image ID: `{image_id}`")
-    st.image(im, caption=f"{ds_name}: Guess the pathology 👇", use_container_width=True)
+    st.markdown(f"### 🖼️ Image ID: `{image_id}`")
+    st.image(im, caption="Guess the pathology 👇", use_container_width=True)
 
-    # ----- Determine correct labels for this row (restricted to selected set + NL if chosen) -----
+    # Determine correct labels for this row (restricted to selected set + NL if chosen)
     row_positive = [c for c in pathology_cols if row.get(c, 0) == 1]
     correct_codes = [c for c in row_positive if c in selected_codes]
     if include_normals and row.get("NL", 0) == 1:
         correct_codes = ["NL"]
 
-    # ----- Modes -----
-    image_key = f"{ds_name}:{image_id}"  # unique across datasets
     if mc_mode:
+        # Multiple-choice (multi-label)
+        image_key = f"ALL:{image_id}"
         options_codes = build_mc_options(image_key, correct_codes, selected_codes, num_choices)
         label_options = [label_map.get(c, c) for c in options_codes]
-        msel_key = f"msel_{ds_name}_{image_id}_{num_choices}"
+        msel_key = f"msel_{image_id}_{num_choices}"
         st.write("Select **all** that apply, then press **Check**.")
         user_choice_labels = st.multiselect("Your selection:", label_options, default=[], key=msel_key)
 
         inv_map = {label_map.get(k, k): k for k in options_codes}
         user_codes = sorted({inv_map[lbl] for lbl in user_choice_labels if lbl in inv_map})
 
-        if st.button("Check"):
+        # Buttons side-by-side
+        colA, colB, colC = st.columns([1,1,2])
+        check_clicked = colA.button("Check", type="primary", key=f"check_mc_{image_id}")
+        next_clicked  = colB.button("Next image", key=f"next_mc_{image_id}")
+
+        if check_clicked:
             st.session_state.attempts += 1
             is_correct = set(user_codes) == set(correct_codes)
             if is_correct:
@@ -563,14 +517,30 @@ def show_quiz():
                 st.error("Not quite.")
             st.session_state.revealed = True
 
+        if next_clicked:
+            st.session_state.current_index = random.choice(df_quiz.index)
+            st.session_state.revealed = False
+            st.rerun()
+
         if st.session_state.revealed:
             render_answer_pills([c for c in correct_codes if c != "NL"])
             st.info(f"**Score:** {st.session_state.score} / {st.session_state.attempts}")
 
     else:
+        # Flashcard mode
         st.write("**Your guess:** (Think before revealing)")
-        if st.button("Reveal answer"):
+        colA, colB, colC = st.columns([1,1,2])
+        reveal_clicked = colA.button("Reveal answer", type="primary", key=f"reveal_{image_id}")
+        next_clicked   = colB.button("Next image", key=f"next_fc_{image_id}")
+
+        if reveal_clicked:
             st.session_state.revealed = True
+
+        if next_clicked:
+            st.session_state.current_index = random.choice(df_quiz.index)
+            st.session_state.revealed = False
+            st.rerun()
+
         if st.session_state.revealed:
             render_answer_pills([c for c in correct_codes if c != "NL"])
 

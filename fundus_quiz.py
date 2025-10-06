@@ -28,7 +28,7 @@ TRAIN_PREFIX = _secret("TRAIN_PREFIX", _secret("S3_PREFIX", "RFMiD/Training"))  
 EVAL_PREFIX  = _secret("EVAL_PREFIX", "RFMiD/Evaluation")
 TEST_PREFIX  = _secret("TEST_PREFIX", "RFMiD/Test")
 
-# Per-dataset label CSV URLs
+# Per-dataset label CSV URLs (HTTPS)
 TRAIN_LABELS_CSV_URL = _secret("TRAIN_LABELS_CSV_URL", _secret("LABELS_CSV_URL", ""))
 EVAL_LABELS_CSV_URL  = _secret("EVAL_LABELS_CSV_URL",  "")
 TEST_LABELS_CSV_URL  = _secret("TEST_LABELS_CSV_URL",  "")
@@ -60,7 +60,7 @@ def load_labels_any(url: str, local_fallback: str) -> pd.DataFrame:
         r = requests.get(url, timeout=20)
         r.raise_for_status()
         return pd.read_csv(io.BytesIO(r.content))
-    if os.path.exists(local_fallback):
+    if local_fallback and os.path.exists(local_fallback):
         return pd.read_csv(local_fallback)
     raise FileNotFoundError(
         "Could not load labels CSV. Set the dataset’s *_LABELS_CSV_URL in Secrets (S3 HTTPS), "
@@ -116,60 +116,91 @@ def render_answer_pills(codes: List[str]):
     )
     st.markdown(f"**Correct answers:** {pills}", unsafe_allow_html=True)
 
-# Dataset config helpers
-DATASETS = {
+# ---------- Dataset utilities ----------
+DATASETS: Dict[str, Tuple[str, str]] = {
     "Training":   (TRAIN_PREFIX, TRAIN_LABELS_CSV_URL),
     "Evaluation": (EVAL_PREFIX,  EVAL_LABELS_CSV_URL),
     "Test":       (TEST_PREFIX,  TEST_LABELS_CSV_URL),
 }
 
 def _prepare_df(df_local: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
-    """Compute pathology columns, virtual NL, and num_pathologies; return df and path_cols (exclude ID, NL, num_pathologies)."""
-    all_cols = df_local.columns.tolist()
-    path_cols = [c for c in all_cols if c not in ("ID", "NL", "num_pathologies")]
-    # Compute virtual NL if missing (based on no positive labels across path_cols)
+    """
+    Ensure numeric label columns, compute virtual NL, and num_pathologies.
+    Returns (df, pathology_cols) where pathology_cols excludes ID, NL, and helper columns.
+    """
+    # Columns that are *not* labels
+    non_label_cols = {"ID", "NL", "num_pathologies", "dataset", "img_prefix"}
+
+    # Identify label columns (everything else)
+    path_cols = [c for c in df_local.columns if c not in non_label_cols]
+
+    # Coerce label columns to numeric (0/1); treat anything non-numeric as 0
+    if path_cols:
+        df_local[path_cols] = (
+            df_local[path_cols]
+            .apply(pd.to_numeric, errors="coerce")  # "0"/"1" -> 0/1; NaN if not numeric
+            .fillna(0)
+            .astype(int)
+        )
+
+    # Compute num_pathologies across label columns (exclude NL)
     num_path = df_local[path_cols].sum(axis=1) if path_cols else pd.Series(0, index=df_local.index)
+
+    # Virtual NL if missing
     if "NL" not in df_local.columns:
         df_local["NL"] = (num_path == 0).astype(int)
+
+    # Save convenience column
     df_local["num_pathologies"] = num_path
-    return df_local, [c for c in df_local.columns if c not in ("ID", "NL", "num_pathologies")]
+
+    # Return updated df and the final set of pathology cols (exclude helpers)
+    final_path_cols = [c for c in df_local.columns if c not in non_label_cols]
+    return df_local, final_path_cols
 
 def load_single_dataset(name: str) -> Tuple[pd.DataFrame, str, List[str]]:
     """Return (labels_df, image_prefix, pathology_cols) for a single dataset."""
     prefix, csv_url = DATASETS[name]
     df_local = load_labels_any(csv_url, LOCAL_LABELS_FALLBACK if name == "Training" else "")
-    df_local, path_cols = _prepare_df(df_local)
     df_local["dataset"] = name
     df_local["img_prefix"] = prefix
+    df_local, path_cols = _prepare_df(df_local)
     return df_local, prefix, path_cols
 
 def load_all_datasets() -> Tuple[pd.DataFrame, List[str]]:
     """
     Load and union Training/Evaluation/Test (only those with CSV URLs set).
-    Align columns (outer union), fill missing labels with 0.
+    Outer-join columns across splits, fill missing labels with 0, coerce labels to numeric.
     """
     dfs = []
-    path_cols_union = set()
     for name in ["Training", "Evaluation", "Test"]:
         prefix, csv_url = DATASETS[name]
         if not csv_url:
-            continue  # skip datasets without labels URL
+            continue
         df_local = load_labels_any(csv_url, LOCAL_LABELS_FALLBACK if name == "Training" else "")
         df_local["dataset"] = name
         df_local["img_prefix"] = prefix
         dfs.append(df_local)
-        path_cols_union.update([c for c in df_local.columns if c not in ("ID", "NL", "num_pathologies", "dataset", "img_prefix")])
 
     if not dfs:
         raise FileNotFoundError("No dataset labels URLs are set in Secrets. Configure *_LABELS_CSV_URL.")
 
-    # Outer-concat and fill missing label columns with 0
+    # Outer concat to align columns from different splits
     df_all = pd.concat(dfs, axis=0, ignore_index=True, sort=False)
-    # Ensure all label columns exist
-    for c in path_cols_union:
-        if c not in df_all.columns:
-            df_all[c] = 0
-    # Prepare (virtual NL + num_pathologies)
+
+    # Determine which columns are labels (exclude known non-labels)
+    non_label_cols = {"ID", "NL", "num_pathologies", "dataset", "img_prefix"}
+    candidate_label_cols = [c for c in df_all.columns if c not in non_label_cols]
+
+    # Coerce candidate label columns to numeric 0/1 (before computing NL and sums)
+    if candidate_label_cols:
+        df_all[candidate_label_cols] = (
+            df_all[candidate_label_cols]
+            .apply(pd.to_numeric, errors="coerce")
+            .fillna(0)
+            .astype(int)
+        )
+
+    # Prepare (computes virtual NL + num_pathologies) and returns final pathology columns
     df_all, path_cols_final = _prepare_df(df_all)
     return df_all, path_cols_final
 
@@ -281,12 +312,8 @@ def show_quiz():
 
     if dataset_choice == "All":
         df, pathology_cols = load_all_datasets()
-        img_prefix_for_row = df["img_prefix"]
-        dataset_for_row = df["dataset"]
     else:
         df, img_prefix, pathology_cols = load_single_dataset(dataset_choice)
-        img_prefix_for_row = None
-        dataset_for_row = None
 
     # ----- Sidebar: quiz setup -----
     st.sidebar.header("Quiz setup")
@@ -353,8 +380,8 @@ def show_quiz():
         # ----- Current item -----
         row = df_quiz.loc[st.session_state.current_index]
         image_id = normalize_id(row["ID"])
-        prefix = row["img_prefix"] if dataset_choice == "All" else (img_prefix_for_row or img_prefix)
-        ds_name = row["dataset"] if dataset_choice == "All" else dataset_choice
+        prefix = row["img_prefix"]  # always present
+        ds_name = row["dataset"]    # always present
         image_url = resolve_image_url(prefix, image_id)
 
         try:
@@ -372,8 +399,7 @@ def show_quiz():
         row_positive = [c for c in pathology_cols if row.get(c, 0) == 1]
         correct_codes_all = sorted(row_positive)
 
-        # Binary answer UI
-        # Use a unique key combining dataset and id to avoid state clashes in "All"
+        # Binary answer UI (unique key per dataset+id)
         choice_key = f"pap_choice_{ds_name}_{image_id}"
         user_choice = st.radio("Your answer:", ["Papilledema — Yes", "Papilledema — No"], index=None, key=choice_key)
 
@@ -444,10 +470,7 @@ def show_quiz():
             st.session_state.current_index = random.choice(df_quiz.index)
             st.session_state.revealed = False
     with col_top2:
-        if dataset_choice == "All":
-            ds_info = "All datasets"
-        else:
-            ds_info = dataset_choice
+        ds_info = "All datasets" if dataset_choice == "All" else dataset_choice
         cat_label = ', '.join(selected_categories) if selected_categories else '—'
         st.write(f"**Dataset:** {ds_info}  |  **Pool size:** {len(df_quiz)}  |  **Categories:** {cat_label}"
                  f"{'  |  + Normals' if include_normals else ''}")
@@ -459,8 +482,8 @@ def show_quiz():
     # ----- Current item (S3 image load) -----
     row = df_quiz.loc[st.session_state.current_index]
     image_id = normalize_id(row["ID"])
-    prefix = row["img_prefix"] if dataset_choice == "All" else (img_prefix_for_row or row.get("img_prefix", TRAIN_PREFIX))
-    ds_name = row["dataset"] if dataset_choice == "All" else dataset_choice
+    prefix = row["img_prefix"]  # present in df from loaders
+    ds_name = row["dataset"]
     image_url = resolve_image_url(prefix, image_id)
 
     try:

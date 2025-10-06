@@ -91,9 +91,28 @@ def build_mc_options(image_id: str, correct_codes: List[str], selected_codes: Li
     need = max(0, num_choices - len(options))
     if need > 0 and distractors:
         options += rng.sample(distractors, min(need, len(distractors)))
-    # If there are more correct labels than num_choices, we still include them all.
-    # Sort by code for a stable order (keeps determinism).
-    return sorted(set(options))
+    return sorted(set(options))  # stable order
+
+def render_answer_pills(codes: List[str]):
+    """Show all correct answers as pill-like badges."""
+    if not codes:
+        st.markdown("**Correct answers:** Normal")
+        return
+    labels = [label_map.get(c, c) for c in codes]
+    pills = " ".join([f"<span class='pill'>{l}</span>" for l in labels])
+    st.markdown(
+        """
+        <style>
+        .pill {
+            display:inline-block; padding:6px 10px; margin:4px 6px 0 0;
+            border-radius:999px; background:#eef2ff; border:1px solid #c7d2fe;
+            font-size:0.9rem;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown(f"**Correct answers:** {pills}", unsafe_allow_html=True)
 
 # ===================== LABEL MAPS =====================
 # Full RFMiD code → human label mapping
@@ -323,16 +342,16 @@ def show_quiz():
 
         if st.button("Check"):
             st.session_state.attempts += 1
-            if set(user_codes) == set(correct_codes):
+            is_correct = set(user_codes) == set(correct_codes)
+            if is_correct:
                 st.success("✅ Correct!")
                 st.session_state.score += 1
-                st.session_state.revealed = True
             else:
-                human_correct = ", ".join([label_map.get(c, c) for c in correct_codes]) if correct_codes else "Normal"
-                st.error(f"Not quite. Correct: {human_correct}")
-                st.session_state.revealed = True
+                st.error("Not quite.")
+            st.session_state.revealed = True
 
         if st.session_state.revealed:
+            render_answer_pills(correct_codes)
             st.info(f"**Score:** {st.session_state.score} / {st.session_state.attempts}")
 
     else:
@@ -341,11 +360,7 @@ def show_quiz():
         if st.button("Reveal answer"):
             st.session_state.revealed = True
         if st.session_state.revealed:
-            if correct_codes:
-                human = ", ".join([label_map.get(c, c) for c in correct_codes])
-                st.success(human)
-            else:
-                st.info("Normal / No selected-category labels present.")
+            render_answer_pills(correct_codes)
 
 # ===================== MAIN =====================
 def main():

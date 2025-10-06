@@ -2,7 +2,7 @@
 import os
 import io
 import random
-from typing import List
+from typing import List, Tuple, Dict
 
 import requests
 import pandas as pd
@@ -13,21 +13,28 @@ import streamlit as st
 def _secret(key: str, default: str = "") -> str:
     """Prefer Streamlit secrets; fall back to environment variables."""
     try:
-        return st.secrets.get(key, default)  # Streamlit Cloud
+        return st.secrets.get(key, default)
     except Exception:
-        return os.getenv(key, default)       # local dev
+        return os.getenv(key, default)
 
+# Bucket / region (shared)
 S3_BUCKET = _secret("S3_BUCKET", "fundus-quiz")
 S3_REGION = _secret("S3_REGION", "eu-north-1")
-S3_PREFIX = _secret("S3_PREFIX", "RFMiD/Training")  # path inside bucket with PNGs
 USE_S3 = _secret("USE_S3", "1") == "1"
-
-# IMPORTANT: labels CSV must be reachable over HTTPS (e.g., S3 object URL)
-LABELS_CSV_URL = _secret("LABELS_CSV_URL", "").strip()
-# Optional small fallback if you ship a tiny demo CSV in the repo:
-LOCAL_LABELS_FALLBACK = "RFMiD_Training_Labels.csv"
-
 S3_BASE = f"https://{S3_BUCKET}.s3.{S3_REGION}.amazonaws.com"
+
+# Per-dataset image prefixes (folders in bucket)
+TRAIN_PREFIX = _secret("TRAIN_PREFIX", _secret("S3_PREFIX", "RFMiD/Training"))  # keep old S3_PREFIX for backward compat
+EVAL_PREFIX = _secret("EVAL_PREFIX", "RFMiD/Evaluation")
+TEST_PREFIX = _secret("TEST_PREFIX", "RFMiD/Test")
+
+# Per-dataset label CSV URLs
+TRAIN_LABELS_CSV_URL = _secret("TRAIN_LABELS_CSV_URL", _secret("LABELS_CSV_URL", ""))  # keep old key for backward compat
+EVAL_LABELS_CSV_URL  = _secret("EVAL_LABELS_CSV_URL",  "")
+TEST_LABELS_CSV_URL  = _secret("TEST_LABELS_CSV_URL",  "")
+
+# Optional tiny local fallback (demo)
+LOCAL_LABELS_FALLBACK = "RFMiD_Training_Labels.csv"
 
 # ===================== STREAMLIT PAGE CONFIG =====================
 st.set_page_config(page_title="RFMiD Fundus Quiz", layout="wide")
@@ -41,10 +48,10 @@ def normalize_id(any_id) -> str:
     except ValueError:
         return s
 
-def resolve_image_url(image_id: str) -> str:
+def resolve_image_url(prefix: str, image_id: str) -> str:
     """Build direct HTTPS URL to PNG in S3 (non-zero-padded)."""
     clean = normalize_id(image_id)
-    return f"{S3_BASE}/{S3_PREFIX}/{clean}.png"
+    return f"{S3_BASE}/{prefix}/{clean}.png"
 
 @st.cache_data(show_spinner=False)
 def load_labels_any(url: str, local_fallback: str) -> pd.DataFrame:
@@ -56,7 +63,7 @@ def load_labels_any(url: str, local_fallback: str) -> pd.DataFrame:
     if os.path.exists(local_fallback):
         return pd.read_csv(local_fallback)
     raise FileNotFoundError(
-        "Could not load labels CSV. Set LABELS_CSV_URL in Secrets to your S3 HTTPS CSV, "
+        "Could not load labels CSV. Set the dataset’s *_LABELS_CSV_URL in Secrets (S3 HTTPS), "
         "or include a small 'RFMiD_Training_Labels.csv' in the repo."
     )
 
@@ -108,6 +115,29 @@ def render_answer_pills(codes: List[str]):
         unsafe_allow_html=True,
     )
     st.markdown(f"**Correct answers:** {pills}", unsafe_allow_html=True)
+
+# Dataset config helpers
+DATASETS: Dict[str, Tuple[str, str]] = {
+    "Training":   (TRAIN_PREFIX, TRAIN_LABELS_CSV_URL),
+    "Evaluation": (EVAL_PREFIX,  EVAL_LABELS_CSV_URL),
+    "Test":       (TEST_PREFIX,  TEST_LABELS_CSV_URL),
+}
+
+def load_dataset(name: str) -> Tuple[pd.DataFrame, str]:
+    """Return (labels_df, image_prefix) for chosen dataset."""
+    prefix, csv_url = DATASETS[name]
+    df_local = load_labels_any(csv_url, LOCAL_LABELS_FALLBACK if name == "Training" else "")
+    # Identify label columns (assume all except ID initially)
+    all_cols = df_local.columns.tolist()
+    path_cols = [c for c in all_cols if c.lower() != "id"]
+    # Compute virtual NL if missing (based on no positive labels across path_cols)
+    num_path = df_local[path_cols].sum(axis=1) if path_cols else pd.Series(0, index=df_local.index)
+    if "NL" not in df_local.columns:
+        df_local["NL"] = (num_path == 0).astype(int)
+    # Keep convenience column excluding NL for path count
+    if "num_pathologies" not in df_local.columns:
+        df_local["num_pathologies"] = num_path
+    return df_local, prefix
 
 # ===================== LABEL MAPS =====================
 label_map = {
@@ -170,7 +200,7 @@ label_map = {
     "MNF": "Myelinated Nerve Fibers",
 
     # Media / vitreous / other
-    "MH": "Media Haze",  # note: RFMiD 'MH' = Media Haze (Macular hole is 'MHL')
+    "MH": "Media Haze",  # RFMiD 'MH' = Media Haze (Macular hole is 'MHL')
     "AH": "Asteroid Hyalosis",
 
     # Rare/misc
@@ -178,7 +208,6 @@ label_map = {
     "PTCR": "Post-Traumatic Choroidal Rupture",
 }
 
-# Category groupings (edit to taste)
 category_map = {
     "Diabetic retinopathy": ["DR", "CME", "EDN", "LS", "TV", "CL"],
     "AMD / degenerative": ["ARMD", "DN", "RPEC", "CRS", "CF", "TSLN", "MYA", "HPED", "MS"],
@@ -189,23 +218,6 @@ category_map = {
     "Inflammatory / dystrophies": ["RS", "RP", "CWS", "CB", "MNF", "VS"],
     "Media / vitreous / other": ["MH", "AH", "PT", "PTCR"],
 }
-
-# ===================== LOAD LABELS + PREP DATA =====================
-df = load_labels_any(LABELS_CSV_URL, LOCAL_LABELS_FALLBACK)
-
-# Determine pathology columns (assume all except 'ID' are labels initially)
-all_cols = df.columns.tolist()
-pathology_cols: List[str] = [c for c in all_cols if c.lower() != "id"]
-
-# Compute a virtual NL column if it's missing: NL = 1 when no pathology is present
-# (Do NOT include NL when computing num_pathologies)
-num_pathologies = df[pathology_cols].sum(axis=1)
-if "NL" not in df.columns:
-    df["NL"] = (num_pathologies == 0).astype(int)
-
-# Keep a convenience column for later filters (excluding NL)
-df["num_pathologies"] = num_pathologies
-df_nonempty = df[df["num_pathologies"] > 0].copy()
 
 # ===================== UI PAGES =====================
 def show_intro():
@@ -222,11 +234,7 @@ Pachade, S., Porwal, P., Thulkar, D., et al.
 **Data** 2021, 6(2), 14.  
 <https://www.mdpi.com/2306-5729/6/2/14>
 
-RFMiD contains 3,200 fundus images annotated for **46** disease/pathology categories by expert graders.
-
-Use the **sidebar** to select disease categories, toggle **Multiple-choice mode**, and choose whether to **include normals (NL)**.  
-Or enable **Papilledema (yes/no) mode** for a binary quiz.
-Then click **Start Quiz**.
+Use the **sidebar** to pick a dataset, choose disease categories, enable **Multiple-choice** or **Papilledema (yes/no)** mode, and optionally include **Normals (NL)**.
 """
     )
     if st.button("Start Quiz"):
@@ -234,12 +242,16 @@ Then click **Start Quiz**.
 
 def show_quiz():
     # ----- Sidebar controls -----
-    st.sidebar.header("Quiz setup")
+    st.sidebar.header("Dataset")
+    dataset = st.sidebar.selectbox("Choose dataset", ["Training", "Evaluation", "Test"], index=0)
+    df, img_prefix = load_dataset(dataset)
 
-    # Papilledema binary mode toggle
+    # Pathology columns for this dataset (exclude ID and NL)
+    pathology_cols = [c for c in df.columns if c not in ("ID", "NL", "num_pathologies")]
+
+    st.sidebar.header("Quiz setup")
     pap_mode = st.sidebar.checkbox("Papilledema (yes/no) mode", value=False, help="Binary quiz: ODE vs Normal")
 
-    # Standard category selection (used when pap_mode is OFF)
     default_categories = [
         "Diabetic retinopathy",
         "AMD / degenerative",
@@ -260,7 +272,6 @@ def show_quiz():
 
     # ----- Build quiz pool depending on mode -----
     if pap_mode:
-        # We now *always* have an NL column (real or virtual)
         if "ODE" not in df.columns:
             st.error("Label 'ODE' (papilledema) not found in labels CSV.")
             return
@@ -271,10 +282,10 @@ def show_quiz():
         df_quiz = df[pool_mask].copy()
 
         if df_quiz.empty:
-            st.warning("No images found for Papilledema vs Normal.")
+            st.warning("No images found for Papilledema vs Normal in this dataset.")
             return
 
-        sig = current_filter_signature(pap_mode=pap_mode)
+        sig = current_filter_signature(dataset=dataset, pap_mode=pap_mode)
         if "filter_signature" not in st.session_state or st.session_state.filter_signature != sig:
             st.session_state.filter_signature = sig
             st.session_state.current_index = random.choice(df_quiz.index)
@@ -293,7 +304,7 @@ def show_quiz():
                 st.session_state.current_index = random.choice(df_quiz.index)
                 st.session_state.revealed = False
         with col_top2:
-            st.write(f"**Papilledema vs Normal**  |  **Pool size:** {len(df_quiz)}")
+            st.write(f"**Dataset:** {dataset}  |  **Papilledema vs Normal**  |  **Pool size:** {len(df_quiz)}")
         with col_top3:
             if st.button("Reset score"):
                 st.session_state.score = 0
@@ -302,7 +313,7 @@ def show_quiz():
         # ----- Current item -----
         row = df_quiz.loc[st.session_state.current_index]
         image_id = normalize_id(row["ID"])
-        image_url = resolve_image_url(image_id)
+        image_url = resolve_image_url(img_prefix, image_id)
 
         try:
             buf = fetch_png(image_url)
@@ -312,16 +323,15 @@ def show_quiz():
             return
 
         st.markdown(f"### 🖼️ Image ID: `{image_id}`")
-        st.image(im, caption="Papilledema — Yes or No?", use_container_width=True)
+        st.image(im, caption=f"{dataset}: Papilledema — Yes or No?", use_container_width=True)
 
         # Ground truth for pap-mode
         is_pap = bool(row.get("ODE", 0) == 1)
-        # Show all labels on reveal (incl. non-pap)
-        row_positive = [c for c in df.columns if c not in ("ID",) and row.get(c, 0) == 1 and c != "NL"]
+        row_positive = [c for c in pathology_cols if row.get(c, 0) == 1]
         correct_codes_all = sorted(row_positive)
 
         # Binary answer UI
-        choice_key = f"pap_choice_{image_id}"
+        choice_key = f"pap_choice_{dataset}_{image_id}"
         user_choice = st.radio("Your answer:", ["Papilledema — Yes", "Papilledema — No"], index=None, key=choice_key)
 
         if st.button("Check"):
@@ -340,8 +350,7 @@ def show_quiz():
         if st.session_state.revealed:
             render_answer_pills(correct_codes_all)
             st.info(f"**Score:** {st.session_state.score} / {st.session_state.attempts}")
-
-        return  # end pap-mode early
+        return
 
     # ===== Normal multi-label modes (when pap_mode is OFF) =====
     selected_codes = {code for cat in selected_categories for code in category_map.get(cat, [])}
@@ -367,6 +376,7 @@ def show_quiz():
 
     # ----- State reset if filters change -----
     sig = current_filter_signature(
+        dataset=dataset,
         pap_mode=False,
         selected_categories=selected_categories,
         include_normals=include_normals,
@@ -392,7 +402,7 @@ def show_quiz():
             st.session_state.revealed = False
     with col_top2:
         cat_label = ', '.join(selected_categories) if selected_categories else '—'
-        st.write(f"**Pool size:** {len(df_quiz)}  |  **Categories:** {cat_label}"
+        st.write(f"**Dataset:** {dataset}  |  **Pool size:** {len(df_quiz)}  |  **Categories:** {cat_label}"
                  f"{'  |  + Normals' if include_normals else ''}")
     with col_top3:
         if st.button("Reset score"):
@@ -402,7 +412,7 @@ def show_quiz():
     # ----- Current item (S3 image load) -----
     row = df_quiz.loc[st.session_state.current_index]
     image_id = normalize_id(row["ID"])
-    image_url = resolve_image_url(image_id)
+    image_url = resolve_image_url(img_prefix, image_id)
 
     try:
         buf = fetch_png(image_url)
@@ -412,27 +422,22 @@ def show_quiz():
         return
 
     st.markdown(f"### 🖼️ Image ID: `{image_id}`")
-    st.image(im, caption="Guess the pathology 👇", use_container_width=True)
+    st.image(im, caption=f"{dataset}: Guess the pathology 👇", use_container_width=True)
 
     # ----- Determine correct labels for this row (restricted to selected set + NL if chosen) -----
-    row_positive = [c for c in pathology_cols if row.get(c, 0) == 1]  # exclude NL by construction
+    row_positive = [c for c in pathology_cols if row.get(c, 0) == 1]
     correct_codes = [c for c in row_positive if c in selected_codes]
-
     if include_normals and row.get("NL", 0) == 1:
         correct_codes = ["NL"]
 
     # ----- Modes -----
     if mc_mode:
-        # Deterministic, per-image MC options to avoid widget resetting on rerun
         options_codes = build_mc_options(image_id, correct_codes, selected_codes, num_choices)
         label_options = [label_map.get(c, c) for c in options_codes]
-
-        # Stable widget key per image so user selection persists
-        msel_key = f"msel_{image_id}_{num_choices}"
+        msel_key = f"msel_{dataset}_{image_id}_{num_choices}"
         st.write("Select **all** that apply, then press **Check**.")
         user_choice_labels = st.multiselect("Your selection:", label_options, default=[], key=msel_key)
 
-        # Map back to codes for scoring
         inv_map = {label_map.get(k, k): k for k in options_codes}
         user_codes = sorted({inv_map[lbl] for lbl in user_choice_labels if lbl in inv_map})
 
@@ -451,7 +456,6 @@ def show_quiz():
             st.info(f"**Score:** {st.session_state.score} / {st.session_state.attempts}")
 
     else:
-        # Flashcard mode
         st.write("**Your guess:** (Think before revealing)")
         if st.button("Reveal answer"):
             st.session_state.revealed = True
@@ -462,7 +466,6 @@ def show_quiz():
 def main():
     if "quiz_started" not in st.session_state:
         st.session_state.quiz_started = False
-
     if not st.session_state.quiz_started:
         show_intro()
     else:

@@ -73,8 +73,15 @@ def fetch_png(url: str) -> io.BytesIO:
     r.raise_for_status()
     return io.BytesIO(r.content)
 
-def current_filter_signature(selected_categories, include_normals, mc_mode, num_choices):
-    return (tuple(sorted(selected_categories)), include_normals, mc_mode, num_choices)
+def current_filter_signature(**kwargs):
+    # Create a stable signature from the quiz settings to reset state when they change
+    items = []
+    for k in sorted(kwargs.keys()):
+        v = kwargs[k]
+        if isinstance(v, list):
+            v = tuple(sorted(v))
+        items.append((k, v))
+    return tuple(items)
 
 def build_mc_options(image_id: str, correct_codes: List[str], selected_codes: List[str], num_choices: int) -> List[str]:
     """
@@ -82,7 +89,6 @@ def build_mc_options(image_id: str, correct_codes: List[str], selected_codes: Li
     Deterministic per (image_id, num_choices, selected_codes) so the widget doesn't reset on rerun.
     Includes ALL correct codes; then fills with distractors up to num_choices (or more if many correct).
     """
-    # deterministic RNG seed
     seed_str = f"{normalize_id(image_id)}|{num_choices}|{','.join(sorted(selected_codes))}"
     rng = random.Random(seed_str)
 
@@ -225,6 +231,7 @@ Pachade, S., Porwal, P., Thulkar, D., et al.
 RFMiD contains 3,200 fundus images annotated for **46** disease/pathology categories by expert graders.
 
 Use the **sidebar** to select disease categories, toggle **Multiple-choice mode**, and choose whether to **include normals (NL)**.  
+Or enable **Papilledema (yes/no) mode** for a binary quiz.
 Then click **Start Quiz**.
 """
     )
@@ -234,6 +241,11 @@ Then click **Start Quiz**.
 def show_quiz():
     # ----- Sidebar controls -----
     st.sidebar.header("Quiz setup")
+
+    # Papilledema binary mode toggle
+    pap_mode = st.sidebar.checkbox("Papilledema (yes/no) mode", value=False, help="Binary quiz: ODE vs Normal")
+
+    # Standard category selection (used when pap_mode is OFF)
     default_categories = [
         "Diabetic retinopathy",
         "AMD / degenerative",
@@ -244,14 +256,103 @@ def show_quiz():
         "Select disease categories to include",
         options=list(category_map.keys()),
         default=default_categories,
+        disabled=pap_mode
     )
-    include_normals = st.sidebar.checkbox("Include normals (NL) in pool", value=False)
+    include_normals = st.sidebar.checkbox("Include normals (NL) in pool", value=False, disabled=pap_mode)
 
     st.sidebar.markdown("---")
-    mc_mode = st.sidebar.checkbox("Multiple-choice mode (multi-label)", value=True)
-    num_choices = st.sidebar.slider("Number of MC options", min_value=3, max_value=8, value=4, step=1)
+    mc_mode = st.sidebar.checkbox("Multiple-choice mode (multi-label)", value=True, disabled=pap_mode)
+    num_choices = st.sidebar.slider("Number of MC options", min_value=3, max_value=8, value=4, step=1, disabled=pap_mode)
 
-    # ----- Build selected codes -----
+    # ----- Build quiz pool depending on mode -----
+    if pap_mode:
+        # Need ODE and NL columns
+        if "ODE" not in df.columns:
+            st.error("Label 'ODE' (papilledema) not found in labels CSV.")
+            return
+        if "NL" not in df.columns:
+            st.error("Label 'NL' (normal) not found in labels CSV.")
+            return
+
+        ode_mask = df["ODE"] == 1
+        nl_mask = df["NL"] == 1
+        pool_mask = ode_mask | nl_mask
+        df_quiz = df[pool_mask].copy()
+
+        if df_quiz.empty:
+            st.warning("No images found for Papilledema vs Normal.")
+            return
+
+        sig = current_filter_signature(pap_mode=pap_mode)
+        if "filter_signature" not in st.session_state or st.session_state.filter_signature != sig:
+            st.session_state.filter_signature = sig
+            st.session_state.current_index = random.choice(df_quiz.index)
+            st.session_state.score = 0
+            st.session_state.attempts = 0
+            st.session_state.revealed = False
+
+        if st.session_state.current_index not in df_quiz.index:
+            st.session_state.current_index = random.choice(df_quiz.index)
+            st.session_state.revealed = False
+
+        # ----- Top bar -----
+        col_top1, col_top2, col_top3 = st.columns([1, 2, 1])
+        with col_top1:
+            if st.button("Next image"):
+                st.session_state.current_index = random.choice(df_quiz.index)
+                st.session_state.revealed = False
+        with col_top2:
+            st.write(f"**Papilledema vs Normal**  |  **Pool size:** {len(df_quiz)}")
+        with col_top3:
+            if st.button("Reset score"):
+                st.session_state.score = 0
+                st.session_state.attempts = 0
+
+        # ----- Current item -----
+        row = df_quiz.loc[st.session_state.current_index]
+        image_id = normalize_id(row["ID"])
+        image_url = resolve_image_url(image_id)
+
+        try:
+            buf = fetch_png(image_url)
+            im = Image.open(buf)
+        except Exception as e:
+            st.error(f"Failed to load image from S3 URL:\n{image_url}\n\n{e}")
+            return
+
+        st.markdown(f"### 🖼️ Image ID: `{image_id}`")
+        st.image(im, caption="Papilledema — Yes or No?", use_container_width=True)
+
+        # Ground truth for pap-mode
+        is_pap = bool(row.get("ODE", 0) == 1)
+        # For transparency, compute all labels (so we can show them on reveal)
+        row_positive = [c for c in pathology_cols if row.get(c, 0) == 1]
+        correct_codes_all = sorted(row_positive)
+
+        # Binary answer UI
+        choice_key = f"pap_choice_{image_id}"
+        user_choice = st.radio("Your answer:", ["Papilledema — Yes", "Papilledema — No"], index=None, key=choice_key)
+
+        if st.button("Check"):
+            if user_choice is None:
+                st.warning("Please select Yes or No.")
+            else:
+                st.session_state.attempts += 1
+                user_is_pap = (user_choice == "Papilledema — Yes")
+                if user_is_pap == is_pap:
+                    st.success("✅ Correct!")
+                    st.session_state.score += 1
+                else:
+                    st.error("Not quite.")
+                st.session_state.revealed = True
+
+        if st.session_state.revealed:
+            render_answer_pills(correct_codes_all)
+            st.info(f"**Score:** {st.session_state.score} / {st.session_state.attempts}")
+
+        return  # end pap-mode early
+
+    # ===== Normal multi-label modes (when pap_mode is OFF) =====
     selected_codes = {code for cat in selected_categories for code in category_map.get(cat, [])}
     if include_normals and "NL" in df.columns:
         selected_codes.add("NL")
@@ -274,7 +375,13 @@ def show_quiz():
         return
 
     # ----- State reset if filters change -----
-    sig = current_filter_signature(selected_categories, include_normals, mc_mode, num_choices)
+    sig = current_filter_signature(
+        pap_mode=pap_mode,
+        selected_categories=selected_categories,
+        include_normals=include_normals,
+        mc_mode=mc_mode,
+        num_choices=num_choices,
+    )
     if "filter_signature" not in st.session_state or st.session_state.filter_signature != sig:
         st.session_state.filter_signature = sig
         st.session_state.current_index = random.choice(df_quiz.index)
@@ -282,7 +389,6 @@ def show_quiz():
         st.session_state.attempts = 0
         st.session_state.revealed = False
 
-    # Safety: if index not in pool, reset
     if st.session_state.current_index not in df_quiz.index:
         st.session_state.current_index = random.choice(df_quiz.index)
         st.session_state.revealed = False

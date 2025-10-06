@@ -2,7 +2,7 @@
 import os
 import io
 import random
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Optional
 
 import requests
 import pandas as pd
@@ -37,7 +37,7 @@ TEST_LABELS_CSV_URL  = _secret("TEST_LABELS_CSV_URL",  "")
 LOCAL_LABELS_FALLBACK = "RFMiD_Training_Labels.csv"
 
 # ===================== STREAMLIT PAGE CONFIG =====================
-st.set_page_config(page_title="RFMiD Fundus Quiz", layout="wide")
+st.set_page_config(page_title="Fundus Pathology Quiz", layout="wide")
 
 # ===================== HELPERS =====================
 def normalize_id(any_id) -> str:
@@ -115,6 +115,16 @@ def render_answer_pills(codes: List[str]):
         unsafe_allow_html=True,
     )
     st.markdown(f"**Correct answers:** {pills}", unsafe_allow_html=True)
+
+def get_hero_image_url() -> Optional[str]:
+    """
+    Try to show a nice fundus 'hero' image from your public S3.
+    Preference order: Training(1.png) → Evaluation(1.png) → Test(1.png).
+    """
+    for prefix in [TRAIN_PREFIX, EVAL_PREFIX, TEST_PREFIX]:
+        if prefix:
+            return resolve_image_url(prefix, "1")
+    return None
 
 # ---------- Dataset utilities ----------
 DATASETS: Dict[str, Tuple[str, str]] = {
@@ -286,24 +296,53 @@ category_map = {
 
 # ===================== UI PAGES =====================
 def show_intro():
-    st.title("Fundus Pathology Quiz (RFMiD)")
+    st.title("Fundus Pathology Quiz")
     st.markdown(
         """
-**Credits & Reference**
+**An online interactive quiz tool for fundus photo evaluation training.**
 
-This quiz uses the **Retinal Fundus Multi-Disease Image Dataset (RFMiD)**.
-
-**Citation:**  
-Pachade, S., Porwal, P., Thulkar, D., et al.  
-*Retinal Fundus Multi-Disease Image Dataset (RFMiD): A Dataset for Multi-Disease Detection Research.*  
-**Data** 2021, 6(2), 14.  
-<https://www.mdpi.com/2306-5729/6/2/14>
-
-Use the **sidebar** to pick a dataset (**Training / Evaluation / Test / All**), choose disease categories, enable **Multiple-choice** or **Papilledema (yes/no)** mode, and optionally include **Normals (NL)**.
+This app lets you practice recognizing retinal pathologies on color fundus photographs using the RFMiD dataset.
+Choose a dataset split, select pathology categories, switch between **Multiple-choice** and **Flashcard** modes,
+or try the **Papilledema (yes/no)** binary quiz.
 """
     )
+
+    # Hero fundus image (from your S3) + quick CTA
+    hero_url = get_hero_image_url()
+    if hero_url:
+        st.image(hero_url, use_container_width=True, caption="Sample fundus image (RFMiD)")
+
+    st.markdown("### Credits & Reference")
+    st.markdown(
+        """
+Developed by **Anders Hougaard, MD, PhD**, University of Copenhagen / Copenhagen University Hospital.
+
+This quiz uses the **Retinal Fundus Multi-Disease Image Dataset (RFMiD)**.  
+**Citation:** Pachade, S., Porwal, P., Thulkar, D., *et al.*  
+*Retinal Fundus Multi-Disease Image Dataset (RFMiD): A Dataset for Multi-Disease Detection Research.*  
+**Data** 2021, 6(2), 14. <https://www.mdpi.com/2306-5729/6/2/14>
+"""
+    )
+
+    # Logos side-by-side
+    col1, col2 = st.columns(2)
+    with col1:
+        st.image(
+            "https://designguide.ku.dk/billeder/samarb4_uk.jpg",
+            caption="University of Copenhagen",
+            use_container_width=True,
+        )
+    with col2:
+        st.image(
+            "https://www.regionh.dk/til-fagfolk/Om-Region-H/regionens-design/logo-og-grundelementer/logo-til-print-og-web/PublishingImages/Maerke_Hospital.jpg",
+            caption="The Capital Region of Denmark (Copenhagen University Hospital)",
+            use_container_width=True,
+        )
+
+    st.markdown("---")
     if st.button("Start Quiz"):
         st.session_state.quiz_started = True
+        st.rerun()  # <-- ensure immediate transition without needing a second click
 
 def show_quiz():
     # ----- Sidebar: dataset selection -----
@@ -470,7 +509,7 @@ def show_quiz():
             st.session_state.current_index = random.choice(df_quiz.index)
             st.session_state.revealed = False
     with col_top2:
-        ds_info = "All datasets" if dataset_choice == "All" else dataset_choice
+        ds_info = dataset_choice if dataset_choice != "All" else "All datasets"
         cat_label = ', '.join(selected_categories) if selected_categories else '—'
         st.write(f"**Dataset:** {ds_info}  |  **Pool size:** {len(df_quiz)}  |  **Categories:** {cat_label}"
                  f"{'  |  + Normals' if include_normals else ''}")

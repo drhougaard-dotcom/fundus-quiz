@@ -154,15 +154,6 @@ def _prepare_df(df_local: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
     final_path_cols = [c for c in df_local.columns if c not in non_label_cols]
     return df_local, final_path_cols
 
-def load_single_dataset(name: str) -> Tuple[pd.DataFrame, str, List[str]]:
-    """Return (labels_df, image_prefix, pathology_cols) for a single dataset."""
-    prefix, csv_url = DATASETS[name]
-    df_local = load_labels_any(csv_url, LOCAL_LABELS_FALLBACK if name == "Training" else "")
-    df_local["dataset"] = name
-    df_local["img_prefix"] = prefix
-    df_local, path_cols = _prepare_df(df_local)
-    return df_local, prefix, path_cols
-
 def load_all_datasets() -> Tuple[pd.DataFrame, List[str]]:
     """
     Load and union Training/Evaluation/Test (only those with CSV URLs set).
@@ -293,7 +284,7 @@ annotated through adjudicated consensus of two senior retinal experts.
     # Small hero fundus image (from your S3)
     hero_url = get_hero_image_url()
     if hero_url:
-        st.image(hero_url, caption="Sample fundus image (RFMiD)", width=360)
+        st.image(hero_url, caption="Sample fundus image (RFMiD)", width=320)
 
     st.markdown("### Credits & Reference")
     st.markdown(
@@ -307,19 +298,20 @@ This quiz uses the **Retinal Fundus Multi-Disease Image Dataset (RFMiD)**.
 """
     )
 
-    # Small logos side-by-side
-    col1, col2 = st.columns(2)
-    with col1:
+    # Compact logos side-by-side, Capital Region smaller & closer
+    # Use tight columns to reduce spacing between the two logos
+    col_logo1, col_logo2, _spacer = st.columns([1, 0.8, 8])
+    with col_logo1:
         st.image(
-            "https://cdn.imgbin.com/21/0/4/imgbin-university-of-copenhagen-faculty-of-health-and-medical-sciences-technical-university-of-denmark-copenhagen-business-school-student-wXtHuujc5LtcLsFJ6avSvz84K.jpg",
+            "https://designguide.ku.dk/download/co-branding/ku_logo_uk_h.png",
             caption="University of Copenhagen",
-            width=220,
+            width=180,
         )
-    with col2:
+    with col_logo2:
         st.image(
             "https://www.regionh.dk/til-fagfolk/Om-Region-H/regionens-design/logo-og-grundelementer/logo-til-print-og-web/PublishingImages/Maerke_Hospital.jpg",
-            caption="The Capital Region of Denmark (Copenhagen University Hospital)",
-            width=220,
+            caption="The Capital Region of Denmark\n(Copenhagen University Hospital)",
+            width=120,
         )
 
     st.markdown("---")
@@ -392,7 +384,8 @@ def show_quiz():
             st.error(f"Failed to load image from S3 URL:\n{image_url}\n\n{e}")
             return
 
-        st.markdown(f"### 🖼️ Image ID: `{image_id}`")
+        ds_name = row["dataset"]
+        st.markdown(f"### 🖼️ Image ID: `{image_id}` • Dataset: **{ds_name}**")
         st.image(im, caption="Papilledema — Yes or No?", use_container_width=True)
 
         # Ground truth for pap-mode
@@ -404,7 +397,7 @@ def show_quiz():
         choice_key = f"pap_choice_{image_id}"
         user_choice = st.radio("Your answer:", ["Papilledema — Yes", "Papilledema — No"], index=None, key=choice_key)
 
-        colA, colB, colC = st.columns([1,1,2])
+        colA, colB, _ = st.columns([1, 1, 6])
         check_clicked = colA.button("Check", type="primary", key=f"check_pap_{image_id}")
         next_clicked  = colB.button("Next image", key=f"next_pap_{image_id}")
 
@@ -481,7 +474,8 @@ def show_quiz():
         st.error(f"Failed to load image from S3 URL:\n{image_url}\n\n{e}")
         return
 
-    st.markdown(f"### 🖼️ Image ID: `{image_id}`")
+    ds_name = row["dataset"]
+    st.markdown(f"### 🖼️ Image ID: `{image_id}` • Dataset: **{ds_name}**")
     st.image(im, caption="Guess the pathology 👇", use_container_width=True)
 
     # Determine correct labels for this row (restricted to selected set + NL if chosen)
@@ -503,7 +497,7 @@ def show_quiz():
         user_codes = sorted({inv_map[lbl] for lbl in user_choice_labels if lbl in inv_map})
 
         # Buttons side-by-side
-        colA, colB, colC = st.columns([1,1,2])
+        colA, colB, _ = st.columns([1, 1, 6])
         check_clicked = colA.button("Check", type="primary", key=f"check_mc_{image_id}")
         next_clicked  = colB.button("Next image", key=f"next_mc_{image_id}")
 
@@ -529,7 +523,7 @@ def show_quiz():
     else:
         # Flashcard mode
         st.write("**Your guess:** (Think before revealing)")
-        colA, colB, colC = st.columns([1,1,2])
+        colA, colB, _ = st.columns([1, 1, 6])
         reveal_clicked = colA.button("Reveal answer", type="primary", key=f"reveal_{image_id}")
         next_clicked   = colB.button("Next image", key=f"next_fc_{image_id}")
 

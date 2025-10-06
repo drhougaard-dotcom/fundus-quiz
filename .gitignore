@@ -1,14 +1,21 @@
-# macOS
+# macOS cruft
 .DS_Store
+**/.DS_Store
+
 # Python
 __pycache__/
 .venv/
-# data / large assets
+
+# RFMiD data (keep code-only repo)
 RFMiD/
 Training/
 Training_Set/
+Evaluation_Set/
+Test_Set/
 *.png
 *.jpg
 *.jpeg
-# keep a tiny demo folder if you want:
+
+# allow a tiny demo if you ever add one
 !images_demo/*.png
+!images_demo/*.jpg

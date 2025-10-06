@@ -1,28 +1,73 @@
-# app.py
+# --- TOP OF FILE (replace your current top section with this) ---
 import os
+import io
 import random
 from typing import List
 
+import requests
 import pandas as pd
 from PIL import Image
 import streamlit as st
 
-# ============ CONFIG (edit these paths to your local RFMiD data) ============
-IMAGE_DIR = "/Users/andershougaard/Documents/Fundusquiz/RFMiD/Training_Set/Training"
-LABELS_CSV = "/Users/andershougaard/Documents/Fundusquiz/RFMiD/Training_Set/RFMiD_Training_Labels.csv"
+# ===================== CONFIG VIA SECRETS / ENV =====================
+# Prefer Streamlit secrets; fall back to env vars for local dev
+def _secret(key: str, default: str = "") -> str:
+    try:
+        return st.secrets.get(key, default)  # Streamlit Cloud
+    except Exception:
+        return os.getenv(key, default)       # local env
 
-# ============ LOAD DATA ============
-@st.cache_data(show_spinner=False)
-def load_labels(csv_path: str) -> pd.DataFrame:
-    df = pd.read_csv(csv_path)
-    return df
+S3_BUCKET = _secret("S3_BUCKET", "fundus-quiz")
+S3_REGION = _secret("S3_REGION", "eu-north-1")
+S3_PREFIX = _secret("S3_PREFIX", "RFMiD/Training")
+USE_S3 = _secret("USE_S3", "1") == "1"
+
+# IMPORTANT: use URL, not a local path
+LABELS_CSV_URL = _secret("LABELS_CSV_URL", "").strip()
+LOCAL_LABELS_FALLBACK = "RFMiD_Training_Labels.csv"  # optional tiny demo file in repo
+
+S3_BASE = f"https://{S3_BUCKET}.s3.{S3_REGION}.amazonaws.com"
 
 st.set_page_config(page_title="RFMiD Fundus Quiz", layout="wide")
-df = load_labels(LABELS_CSV)
+
+# ===================== HELPERS =====================
+def normalize_id(any_id) -> str:
+    s = str(any_id).strip()
+    try:
+        return str(int(s))   # drop any leading zeros
+    except ValueError:
+        return s
+
+def resolve_image_url(image_id: str) -> str:
+    clean = normalize_id(image_id)
+    return f"{S3_BASE}/{S3_PREFIX}/{clean}.png"
+
+@st.cache_data(show_spinner=False)
+def load_labels_any(url: str, local_fallback: str) -> pd.DataFrame:
+    if url:
+        r = requests.get(url, timeout=20)
+        r.raise_for_status()
+        return pd.read_csv(io.BytesIO(r.content))
+    if os.path.exists(local_fallback):
+        return pd.read_csv(local_fallback)
+    raise FileNotFoundError(
+        "Could not load labels CSV. Set LABELS_CSV_URL in Secrets to your S3 HTTPS CSV "
+        "or include a small 'RFMiD_Training_Labels.csv' in the repo."
+    )
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_png(url: str) -> io.BytesIO:
+    r = requests.get(url, timeout=15)
+    r.raise_for_status()
+    return io.BytesIO(r.content)
+
+# --- LOAD THE LABELS FROM URL (THIS REPLACES YOUR OLD local pd.read_csv) ---
+df = load_labels_any(LABELS_CSV_URL, LOCAL_LABELS_FALLBACK)
 
 # Identify pathology columns (assume all except ID are labels)
 all_cols = df.columns.tolist()
 pathology_cols: List[str] = [c for c in all_cols if c.lower() != "id"]
+
 
 # Precompute rows with at least one positive label (non-empty pathology)
 df["num_pathologies"] = df[pathology_cols].sum(axis=1)
@@ -304,4 +349,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

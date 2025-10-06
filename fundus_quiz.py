@@ -1,4 +1,4 @@
-# --- TOP OF FILE (replace your current top section with this) ---
+# fundus_quiz.py
 import os
 import io
 import random
@@ -10,40 +10,51 @@ from PIL import Image
 import streamlit as st
 
 # ===================== CONFIG VIA SECRETS / ENV =====================
-# Prefer Streamlit secrets; fall back to env vars for local dev
 def _secret(key: str, default: str = "") -> str:
+    """Prefer Streamlit secrets; fall back to environment variables."""
     try:
         return st.secrets.get(key, default)  # Streamlit Cloud
     except Exception:
-        return os.getenv(key, default)       # local env
+        return os.getenv(key, default)       # local dev
 
 S3_BUCKET = _secret("S3_BUCKET", "fundus-quiz")
 S3_REGION = _secret("S3_REGION", "eu-north-1")
-S3_PREFIX = _secret("S3_PREFIX", "RFMiD/Training")
+S3_PREFIX = _secret("S3_PREFIX", "RFMiD/Training")  # path inside bucket with PNGs
 USE_S3 = _secret("USE_S3", "1") == "1"
 
-# IMPORTANT: use URL, not a local path
+# IMPORTANT: labels CSV must be reachable over HTTPS (e.g., S3 object URL)
 LABELS_CSV_URL = _secret("LABELS_CSV_URL", "").strip()
-LOCAL_LABELS_FALLBACK = "RFMiD_Training_Labels.csv"  # optional tiny demo file in repo
+# Optional small fallback if you ship a tiny demo CSV in the repo:
+LOCAL_LABELS_FALLBACK = "RFMiD_Training_Labels.csv"
 
 S3_BASE = f"https://{S3_BUCKET}.s3.{S3_REGION}.amazonaws.com"
 
+# ===================== STREAMLIT PAGE CONFIG =====================
 st.set_page_config(page_title="RFMiD Fundus Quiz", layout="wide")
 
 # ===================== HELPERS =====================
 def normalize_id(any_id) -> str:
+    """
+    Convert '0001' -> '1' and leave non-numeric IDs unchanged.
+    Ensures no zero-padding in S3 URLs (keys are '1.png', not '0001.png').
+    """
     s = str(any_id).strip()
     try:
-        return str(int(s))   # drop any leading zeros
+        return str(int(s))
     except ValueError:
         return s
 
 def resolve_image_url(image_id: str) -> str:
+    """Build direct HTTPS URL to PNG in S3 (non-zero-padded)."""
     clean = normalize_id(image_id)
     return f"{S3_BASE}/{S3_PREFIX}/{clean}.png"
 
 @st.cache_data(show_spinner=False)
 def load_labels_any(url: str, local_fallback: str) -> pd.DataFrame:
+    """
+    Load labels from remote URL (S3/HTTP). If that fails and a local CSV exists,
+    use it as a fallback (for small demos).
+    """
     if url:
         r = requests.get(url, timeout=20)
         r.raise_for_status()
@@ -51,31 +62,24 @@ def load_labels_any(url: str, local_fallback: str) -> pd.DataFrame:
     if os.path.exists(local_fallback):
         return pd.read_csv(local_fallback)
     raise FileNotFoundError(
-        "Could not load labels CSV. Set LABELS_CSV_URL in Secrets to your S3 HTTPS CSV "
+        "Could not load labels CSV. Set LABELS_CSV_URL in Secrets to your S3 HTTPS CSV, "
         "or include a small 'RFMiD_Training_Labels.csv' in the repo."
     )
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_png(url: str) -> io.BytesIO:
+    """Download an image from S3 and cache it for an hour."""
     r = requests.get(url, timeout=15)
     r.raise_for_status()
     return io.BytesIO(r.content)
 
-# --- LOAD THE LABELS FROM URL (THIS REPLACES YOUR OLD local pd.read_csv) ---
-df = load_labels_any(LABELS_CSV_URL, LOCAL_LABELS_FALLBACK)
+def current_filter_signature(selected_categories, include_normals, mc_mode, num_choices):
+    return (tuple(sorted(selected_categories)), include_normals, mc_mode, num_choices)
 
-# Identify pathology columns (assume all except ID are labels)
-all_cols = df.columns.tolist()
-pathology_cols: List[str] = [c for c in all_cols if c.lower() != "id"]
-
-
-# Precompute rows with at least one positive label (non-empty pathology)
-df["num_pathologies"] = df[pathology_cols].sum(axis=1)
-df_nonempty = df[df["num_pathologies"] > 0].copy()
-
-# ============ FULL RFMiD LABEL MAP (46 codes) ============
+# ===================== LABEL MAPS =====================
+# Full RFMiD code → human label mapping
 label_map = {
-    # Normal / misc (kept for completeness; selectable via "Include normals")
+    # Normal / misc
     "NL": "Normal",
     "OTHER": "Other abnormalities",
 
@@ -134,15 +138,15 @@ label_map = {
     "MNF": "Myelinated Nerve Fibers",
 
     # Media / vitreous / other
-    "MH": "Media Haze",  # Note: in RFMiD, MH = Media Haze (Macular hole is MHL)
+    "MH": "Media Haze",  # note: RFMiD 'MH' = Media Haze (Macular hole is 'MHL')
     "AH": "Asteroid Hyalosis",
 
-    # Misc rare
+    # Rare/misc
     "PT": "Parafoveal Telangiectasia",
     "PTCR": "Post-Traumatic Choroidal Rupture",
 }
 
-# ============ CATEGORY MAP (edit as you prefer) ============
+# Category groupings (edit to taste)
 category_map = {
     "Diabetic retinopathy": ["DR", "CME", "EDN", "LS", "TV", "CL"],
     "AMD / degenerative": ["ARMD", "DN", "RPEC", "CRS", "CF", "TSLN", "MYA", "HPED", "MS"],
@@ -152,28 +156,20 @@ category_map = {
     "Hemorrhages / exudates": ["PRH", "VH", "EDN", "HR"],
     "Inflammatory / dystrophies": ["RS", "RP", "CWS", "CB", "MNF", "VS"],
     "Media / vitreous / other": ["MH", "AH", "PT", "PTCR"],
-    # Optionally: "Normals / other": ["NL", "OTHER"],  # normals controlled separately below
 }
 
-# ============ HELPERS ============
-def resolve_image_path(image_dir: str, image_id: str):
-    """Try common extensions to find the actual file for an ID."""
-    candidates = [
-        os.path.join(image_dir, f"{image_id}.png"),
-        os.path.join(image_dir, f"{image_id}.jpg"),
-        os.path.join(image_dir, f"{image_id}.jpeg"),
-        os.path.join(image_dir, f"{image_id}.JPG"),
-        os.path.join(image_dir, f"{image_id}.PNG"),
-    ]
-    for p in candidates:
-        if os.path.exists(p):
-            return p
-    return None
+# ===================== LOAD LABELS + PREP DATA =====================
+df = load_labels_any(LABELS_CSV_URL, LOCAL_LABELS_FALLBACK)
 
-def current_filter_signature(selected_categories, include_normals, mc_mode, num_choices):
-    return (tuple(sorted(selected_categories)), include_normals, mc_mode, num_choices)
+# Determine label columns (assume all except ID)
+all_cols = df.columns.tolist()
+pathology_cols: List[str] = [c for c in all_cols if c.lower() != "id"]
 
-# ============ UI PAGES ============
+# Rows with ≥1 positive label (for pathology pool)
+df["num_pathologies"] = df[pathology_cols].sum(axis=1)
+df_nonempty = df[df["num_pathologies"] > 0].copy()
+
+# ===================== UI PAGES =====================
 def show_intro():
     st.title("Fundus Pathology Quiz (RFMiD)")
     st.markdown(
@@ -186,11 +182,12 @@ This quiz uses the **Retinal Fundus Multi-Disease Image Dataset (RFMiD)**.
 Pachade, S., Porwal, P., Thulkar, D., et al.  
 *Retinal Fundus Multi-Disease Image Dataset (RFMiD): A Dataset for Multi-Disease Detection Research.*  
 **Data** 2021, 6(2), 14.  
-[https://www.mdpi.com/2306-5729/6/2/14](https://www.mdpi.com/2306-5729/6/2/14)
+<https://www.mdpi.com/2306-5729/6/2/14>
 
 RFMiD contains 3,200 fundus images annotated for **46** disease/pathology categories by expert graders.
 
-Use the **sidebar** to select which disease categories to include, toggle **Multiple-choice mode**, and choose whether to **include normals (NL)**. Then click **Start Quiz**.
+Use the **sidebar** to select disease categories, toggle **Multiple-choice mode**, and choose whether to **include normals (NL)**.  
+Then click **Start Quiz**.
 """
     )
     if st.button("Start Quiz"):
@@ -208,7 +205,7 @@ def show_quiz():
     selected_categories = st.sidebar.multiselect(
         "Select disease categories to include",
         options=list(category_map.keys()),
-        default=default_categories
+        default=default_categories,
     )
     include_normals = st.sidebar.checkbox("Include normals (NL) in pool", value=False)
 
@@ -226,13 +223,9 @@ def show_quiz():
         st.warning("Please select at least one category or enable normals.")
         return
 
-    # Codes present in CSV:
     present_cols = [c for c in selected_codes if c in df.columns]
-    if not present_cols and not include_normals:
-        st.error("Selected codes are not present in your CSV. Check your RFMiD file or category map.")
-        return
 
-    # ----- Build quiz pool (rows with ≥1 selected label; or NL==1 if normals included) -----
+    # Build quiz pool: rows with ≥1 selected label OR NL==1 if include_normals
     path_mask = (df[present_cols].sum(axis=1) > 0) if present_cols else pd.Series(False, index=df.index)
     nl_mask = (df["NL"] == 1) if (include_normals and "NL" in df.columns) else pd.Series(False, index=df.index)
     pool_mask = path_mask | nl_mask
@@ -242,7 +235,7 @@ def show_quiz():
         st.warning("No images match the current selection. Try adding categories or enabling normals.")
         return
 
-    # ----- Reset state when filters change -----
+    # ----- State reset if filters change -----
     sig = current_filter_signature(selected_categories, include_normals, mc_mode, num_choices)
     if "filter_signature" not in st.session_state or st.session_state.filter_signature != sig:
         st.session_state.filter_signature = sig
@@ -251,7 +244,7 @@ def show_quiz():
         st.session_state.attempts = 0
         st.session_state.revealed = False
 
-    # Safety reset if current index not in pool
+    # Safety: if index not in pool, reset
     if st.session_state.current_index not in df_quiz.index:
         st.session_state.current_index = random.choice(df_quiz.index)
         st.session_state.revealed = False
@@ -263,52 +256,52 @@ def show_quiz():
             st.session_state.current_index = random.choice(df_quiz.index)
             st.session_state.revealed = False
     with col_top2:
-        st.write(f"**Pool size:** {len(df_quiz)}  |  **Categories:** {', '.join(selected_categories) or '—'}"
+        cat_label = ', '.join(selected_categories) if selected_categories else '—'
+        st.write(f"**Pool size:** {len(df_quiz)}  |  **Categories:** {cat_label}"
                  f"{'  |  + Normals' if include_normals else ''}")
     with col_top3:
         if st.button("Reset score"):
             st.session_state.score = 0
             st.session_state.attempts = 0
 
-    # ----- Current image -----
+    # ----- Current item (S3 image load) -----
     row = df_quiz.loc[st.session_state.current_index]
-    image_id = str(row["ID"])
-    img_path = resolve_image_path(IMAGE_DIR, image_id)
-    if not img_path:
-        st.error(f"Image file not found for ID={image_id} in {IMAGE_DIR}")
+    image_id = normalize_id(row["ID"])
+    image_url = resolve_image_url(image_id)
+
+    try:
+        buf = fetch_png(image_url)
+        im = Image.open(buf)
+    except Exception as e:
+        st.error(f"Failed to load image from S3 URL:\n{image_url}\n\n{e}")
         return
 
     st.markdown(f"### 🖼️ Image ID: `{image_id}`")
-    st.image(Image.open(img_path), caption="Guess the pathology 👇", use_container_width=True)
+    st.image(im, caption="Guess the pathology 👇", use_container_width=True)
 
-    # ----- Determine correct labels for this item (limited to selected set + NL if included) -----
-    # Gather positives from all pathology cols present in df for this row:
+    # ----- Determine correct labels for this row (restricted to selected set + NL if chosen) -----
     row_positive = [c for c in pathology_cols if c in df_quiz.columns and row.get(c, 0) == 1]
-    # Restrict to our selected set (incl. NL if chosen):
     correct_codes = [c for c in row_positive if c in selected_codes]
 
-    # If no selected labels present but it's NL and included_normals, define correct as NL
     if include_normals and "NL" in df.columns and row.get("NL", 0) == 1 and ("NL" in selected_codes):
+        # If NL included and this is a normal case, use NL as the correct label
         correct_codes = ["NL"]
 
     # ----- Modes -----
     if mc_mode:
-        # Multiple-choice: multi-select (some images have multiple correct labels)
-        # Build option pool from selected codes: ensure all correct present + sample distractors
+        # multi-label capable MC
         option_pool = set(correct_codes)
         distractor_pool = [c for c in selected_codes if c not in correct_codes]
-        # number of distractors to add
         need = max(0, num_choices - len(option_pool))
         if need > 0 and distractor_pool:
             option_pool.update(random.sample(distractor_pool, min(need, len(distractor_pool))))
         options = sorted(option_pool)
 
-        # Human-readable labels for UI
-        label_options = [label_map.get(c, c) for c in options]
         st.write("Select **all** that apply, then press **Check**.")
+        label_options = [label_map.get(c, c) for c in options]
         user_choice_labels = st.multiselect("Your selection:", label_options, default=[])
 
-        # Convert back to codes for scoring
+        # Map back to codes for scoring
         inv_map = {label_map.get(k, k): k for k in options}
         user_codes = sorted({inv_map[lbl] for lbl in user_choice_labels if lbl in inv_map})
 
@@ -327,7 +320,7 @@ def show_quiz():
             st.info(f"**Score:** {st.session_state.score} / {st.session_state.attempts}")
 
     else:
-        # Flashcard mode (reveal)
+        # Flashcard mode
         st.write("**Your guess:** (Think before revealing)")
         if st.button("Reveal answer"):
             st.session_state.revealed = True
@@ -338,6 +331,7 @@ def show_quiz():
             else:
                 st.info("Normal / No selected-category labels present.")
 
+# ===================== MAIN =====================
 def main():
     if "quiz_started" not in st.session_state:
         st.session_state.quiz_started = False

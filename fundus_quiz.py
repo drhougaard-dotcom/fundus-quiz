@@ -34,10 +34,7 @@ st.set_page_config(page_title="RFMiD Fundus Quiz", layout="wide")
 
 # ===================== HELPERS =====================
 def normalize_id(any_id) -> str:
-    """
-    Convert '0001' -> '1' and leave non-numeric IDs unchanged.
-    Ensures no zero-padding in S3 URLs (keys are '1.png', not '0001.png').
-    """
+    """Drop leading zeros from numeric IDs."""
     s = str(any_id).strip()
     try:
         return str(int(s))
@@ -51,10 +48,7 @@ def resolve_image_url(image_id: str) -> str:
 
 @st.cache_data(show_spinner=False)
 def load_labels_any(url: str, local_fallback: str) -> pd.DataFrame:
-    """
-    Load labels from remote URL (S3/HTTP). If that fails and a local CSV exists,
-    use it as a fallback (for small demos).
-    """
+    """Load labels from remote URL; fallback to local CSV if present."""
     if url:
         r = requests.get(url, timeout=20)
         r.raise_for_status()
@@ -74,7 +68,7 @@ def fetch_png(url: str) -> io.BytesIO:
     return io.BytesIO(r.content)
 
 def current_filter_signature(**kwargs):
-    # Create a stable signature from the quiz settings to reset state when they change
+    """Stable signature from settings to reset state when they change."""
     items = []
     for k in sorted(kwargs.keys()):
         v = kwargs[k]
@@ -84,20 +78,15 @@ def current_filter_signature(**kwargs):
     return tuple(items)
 
 def build_mc_options(image_id: str, correct_codes: List[str], selected_codes: List[str], num_choices: int) -> List[str]:
-    """
-    Build a deterministic set of MC option codes for the given image.
-    Deterministic per (image_id, num_choices, selected_codes) so the widget doesn't reset on rerun.
-    Includes ALL correct codes; then fills with distractors up to num_choices (or more if many correct).
-    """
+    """Deterministic MC options per image/settings so widgets don’t reset."""
     seed_str = f"{normalize_id(image_id)}|{num_choices}|{','.join(sorted(selected_codes))}"
     rng = random.Random(seed_str)
-
     options = list(dict.fromkeys(correct_codes))  # keep order, de-dup
     distractors = [c for c in selected_codes if c not in options]
     need = max(0, num_choices - len(options))
     if need > 0 and distractors:
         options += rng.sample(distractors, min(need, len(distractors)))
-    return sorted(set(options))  # stable order
+    return sorted(set(options))
 
 def render_answer_pills(codes: List[str]):
     """Show all correct answers as pill-like badges."""
@@ -121,7 +110,6 @@ def render_answer_pills(codes: List[str]):
     st.markdown(f"**Correct answers:** {pills}", unsafe_allow_html=True)
 
 # ===================== LABEL MAPS =====================
-# Full RFMiD code → human label mapping
 label_map = {
     # Normal / misc
     "NL": "Normal",
@@ -205,12 +193,18 @@ category_map = {
 # ===================== LOAD LABELS + PREP DATA =====================
 df = load_labels_any(LABELS_CSV_URL, LOCAL_LABELS_FALLBACK)
 
-# Determine label columns (assume all except ID)
+# Determine pathology columns (assume all except 'ID' are labels initially)
 all_cols = df.columns.tolist()
 pathology_cols: List[str] = [c for c in all_cols if c.lower() != "id"]
 
-# Rows with ≥1 positive label (for pathology pool)
-df["num_pathologies"] = df[pathology_cols].sum(axis=1)
+# Compute a virtual NL column if it's missing: NL = 1 when no pathology is present
+# (Do NOT include NL when computing num_pathologies)
+num_pathologies = df[pathology_cols].sum(axis=1)
+if "NL" not in df.columns:
+    df["NL"] = (num_pathologies == 0).astype(int)
+
+# Keep a convenience column for later filters (excluding NL)
+df["num_pathologies"] = num_pathologies
 df_nonempty = df[df["num_pathologies"] > 0].copy()
 
 # ===================== UI PAGES =====================
@@ -266,12 +260,9 @@ def show_quiz():
 
     # ----- Build quiz pool depending on mode -----
     if pap_mode:
-        # Need ODE and NL columns
+        # We now *always* have an NL column (real or virtual)
         if "ODE" not in df.columns:
             st.error("Label 'ODE' (papilledema) not found in labels CSV.")
-            return
-        if "NL" not in df.columns:
-            st.error("Label 'NL' (normal) not found in labels CSV.")
             return
 
         ode_mask = df["ODE"] == 1
@@ -325,8 +316,8 @@ def show_quiz():
 
         # Ground truth for pap-mode
         is_pap = bool(row.get("ODE", 0) == 1)
-        # For transparency, compute all labels (so we can show them on reveal)
-        row_positive = [c for c in pathology_cols if row.get(c, 0) == 1]
+        # Show all labels on reveal (incl. non-pap)
+        row_positive = [c for c in df.columns if c not in ("ID",) and row.get(c, 0) == 1 and c != "NL"]
         correct_codes_all = sorted(row_positive)
 
         # Binary answer UI
@@ -354,7 +345,7 @@ def show_quiz():
 
     # ===== Normal multi-label modes (when pap_mode is OFF) =====
     selected_codes = {code for cat in selected_categories for code in category_map.get(cat, [])}
-    if include_normals and "NL" in df.columns:
+    if include_normals:
         selected_codes.add("NL")
     selected_codes = sorted(selected_codes)
 
@@ -365,8 +356,8 @@ def show_quiz():
     present_cols = [c for c in selected_codes if c in df.columns]
 
     # Build quiz pool: rows with ≥1 selected label OR NL==1 if include_normals
-    path_mask = (df[present_cols].sum(axis=1) > 0) if present_cols else pd.Series(False, index=df.index)
-    nl_mask = (df["NL"] == 1) if (include_normals and "NL" in df.columns) else pd.Series(False, index=df.index)
+    path_mask = (df[[c for c in present_cols if c != "NL"]].sum(axis=1) > 0) if present_cols else pd.Series(False, index=df.index)
+    nl_mask = (df["NL"] == 1) if include_normals else pd.Series(False, index=df.index)
     pool_mask = path_mask | nl_mask
     df_quiz = df[pool_mask].copy()
 
@@ -376,7 +367,7 @@ def show_quiz():
 
     # ----- State reset if filters change -----
     sig = current_filter_signature(
-        pap_mode=pap_mode,
+        pap_mode=False,
         selected_categories=selected_categories,
         include_normals=include_normals,
         mc_mode=mc_mode,
@@ -424,11 +415,10 @@ def show_quiz():
     st.image(im, caption="Guess the pathology 👇", use_container_width=True)
 
     # ----- Determine correct labels for this row (restricted to selected set + NL if chosen) -----
-    row_positive = [c for c in pathology_cols if c in df_quiz.columns and row.get(c, 0) == 1]
+    row_positive = [c for c in pathology_cols if row.get(c, 0) == 1]  # exclude NL by construction
     correct_codes = [c for c in row_positive if c in selected_codes]
 
-    if include_normals and "NL" in df.columns and row.get("NL", 0) == 1 and ("NL" in selected_codes):
-        # If NL included and this is a normal case, use NL as the correct label
+    if include_normals and row.get("NL", 0) == 1:
         correct_codes = ["NL"]
 
     # ----- Modes -----
@@ -457,7 +447,7 @@ def show_quiz():
             st.session_state.revealed = True
 
         if st.session_state.revealed:
-            render_answer_pills(correct_codes)
+            render_answer_pills([c for c in correct_codes if c != "NL"])
             st.info(f"**Score:** {st.session_state.score} / {st.session_state.attempts}")
 
     else:
@@ -466,7 +456,7 @@ def show_quiz():
         if st.button("Reveal answer"):
             st.session_state.revealed = True
         if st.session_state.revealed:
-            render_answer_pills(correct_codes)
+            render_answer_pills([c for c in correct_codes if c != "NL"])
 
 # ===================== MAIN =====================
 def main():

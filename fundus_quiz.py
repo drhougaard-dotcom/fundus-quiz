@@ -24,12 +24,12 @@ USE_S3 = _secret("USE_S3", "1") == "1"
 S3_BASE = f"https://{S3_BUCKET}.s3.{S3_REGION}.amazonaws.com"
 
 # Per-dataset image prefixes (folders in bucket)
-TRAIN_PREFIX = _secret("TRAIN_PREFIX", _secret("S3_PREFIX", "RFMiD/Training"))  # keep old S3_PREFIX for backward compat
-EVAL_PREFIX = _secret("EVAL_PREFIX", "RFMiD/Evaluation")
-TEST_PREFIX = _secret("TEST_PREFIX", "RFMiD/Test")
+TRAIN_PREFIX = _secret("TRAIN_PREFIX", _secret("S3_PREFIX", "RFMiD/Training"))  # backward compatibility
+EVAL_PREFIX  = _secret("EVAL_PREFIX", "RFMiD/Evaluation")
+TEST_PREFIX  = _secret("TEST_PREFIX", "RFMiD/Test")
 
 # Per-dataset label CSV URLs
-TRAIN_LABELS_CSV_URL = _secret("TRAIN_LABELS_CSV_URL", _secret("LABELS_CSV_URL", ""))  # keep old key for backward compat
+TRAIN_LABELS_CSV_URL = _secret("TRAIN_LABELS_CSV_URL", _secret("LABELS_CSV_URL", ""))
 EVAL_LABELS_CSV_URL  = _secret("EVAL_LABELS_CSV_URL",  "")
 TEST_LABELS_CSV_URL  = _secret("TEST_LABELS_CSV_URL",  "")
 
@@ -84,9 +84,9 @@ def current_filter_signature(**kwargs):
         items.append((k, v))
     return tuple(items)
 
-def build_mc_options(image_id: str, correct_codes: List[str], selected_codes: List[str], num_choices: int) -> List[str]:
+def build_mc_options(image_key: str, correct_codes: List[str], selected_codes: List[str], num_choices: int) -> List[str]:
     """Deterministic MC options per image/settings so widgets don’t reset."""
-    seed_str = f"{normalize_id(image_id)}|{num_choices}|{','.join(sorted(selected_codes))}"
+    seed_str = f"{image_key}|{num_choices}|{','.join(sorted(selected_codes))}"
     rng = random.Random(seed_str)
     options = list(dict.fromkeys(correct_codes))  # keep order, de-dup
     distractors = [c for c in selected_codes if c not in options]
@@ -117,27 +117,61 @@ def render_answer_pills(codes: List[str]):
     st.markdown(f"**Correct answers:** {pills}", unsafe_allow_html=True)
 
 # Dataset config helpers
-DATASETS: Dict[str, Tuple[str, str]] = {
+DATASETS = {
     "Training":   (TRAIN_PREFIX, TRAIN_LABELS_CSV_URL),
     "Evaluation": (EVAL_PREFIX,  EVAL_LABELS_CSV_URL),
     "Test":       (TEST_PREFIX,  TEST_LABELS_CSV_URL),
 }
 
-def load_dataset(name: str) -> Tuple[pd.DataFrame, str]:
-    """Return (labels_df, image_prefix) for chosen dataset."""
-    prefix, csv_url = DATASETS[name]
-    df_local = load_labels_any(csv_url, LOCAL_LABELS_FALLBACK if name == "Training" else "")
-    # Identify label columns (assume all except ID initially)
+def _prepare_df(df_local: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
+    """Compute pathology columns, virtual NL, and num_pathologies; return df and path_cols (exclude ID, NL, num_pathologies)."""
     all_cols = df_local.columns.tolist()
-    path_cols = [c for c in all_cols if c.lower() != "id"]
+    path_cols = [c for c in all_cols if c not in ("ID", "NL", "num_pathologies")]
     # Compute virtual NL if missing (based on no positive labels across path_cols)
     num_path = df_local[path_cols].sum(axis=1) if path_cols else pd.Series(0, index=df_local.index)
     if "NL" not in df_local.columns:
         df_local["NL"] = (num_path == 0).astype(int)
-    # Keep convenience column excluding NL for path count
-    if "num_pathologies" not in df_local.columns:
-        df_local["num_pathologies"] = num_path
-    return df_local, prefix
+    df_local["num_pathologies"] = num_path
+    return df_local, [c for c in df_local.columns if c not in ("ID", "NL", "num_pathologies")]
+
+def load_single_dataset(name: str) -> Tuple[pd.DataFrame, str, List[str]]:
+    """Return (labels_df, image_prefix, pathology_cols) for a single dataset."""
+    prefix, csv_url = DATASETS[name]
+    df_local = load_labels_any(csv_url, LOCAL_LABELS_FALLBACK if name == "Training" else "")
+    df_local, path_cols = _prepare_df(df_local)
+    df_local["dataset"] = name
+    df_local["img_prefix"] = prefix
+    return df_local, prefix, path_cols
+
+def load_all_datasets() -> Tuple[pd.DataFrame, List[str]]:
+    """
+    Load and union Training/Evaluation/Test (only those with CSV URLs set).
+    Align columns (outer union), fill missing labels with 0.
+    """
+    dfs = []
+    path_cols_union = set()
+    for name in ["Training", "Evaluation", "Test"]:
+        prefix, csv_url = DATASETS[name]
+        if not csv_url:
+            continue  # skip datasets without labels URL
+        df_local = load_labels_any(csv_url, LOCAL_LABELS_FALLBACK if name == "Training" else "")
+        df_local["dataset"] = name
+        df_local["img_prefix"] = prefix
+        dfs.append(df_local)
+        path_cols_union.update([c for c in df_local.columns if c not in ("ID", "NL", "num_pathologies", "dataset", "img_prefix")])
+
+    if not dfs:
+        raise FileNotFoundError("No dataset labels URLs are set in Secrets. Configure *_LABELS_CSV_URL.")
+
+    # Outer-concat and fill missing label columns with 0
+    df_all = pd.concat(dfs, axis=0, ignore_index=True, sort=False)
+    # Ensure all label columns exist
+    for c in path_cols_union:
+        if c not in df_all.columns:
+            df_all[c] = 0
+    # Prepare (virtual NL + num_pathologies)
+    df_all, path_cols_final = _prepare_df(df_all)
+    return df_all, path_cols_final
 
 # ===================== LABEL MAPS =====================
 label_map = {
@@ -234,21 +268,27 @@ Pachade, S., Porwal, P., Thulkar, D., et al.
 **Data** 2021, 6(2), 14.  
 <https://www.mdpi.com/2306-5729/6/2/14>
 
-Use the **sidebar** to pick a dataset, choose disease categories, enable **Multiple-choice** or **Papilledema (yes/no)** mode, and optionally include **Normals (NL)**.
+Use the **sidebar** to pick a dataset (**Training / Evaluation / Test / All**), choose disease categories, enable **Multiple-choice** or **Papilledema (yes/no)** mode, and optionally include **Normals (NL)**.
 """
     )
     if st.button("Start Quiz"):
         st.session_state.quiz_started = True
 
 def show_quiz():
-    # ----- Sidebar controls -----
+    # ----- Sidebar: dataset selection -----
     st.sidebar.header("Dataset")
-    dataset = st.sidebar.selectbox("Choose dataset", ["Training", "Evaluation", "Test"], index=0)
-    df, img_prefix = load_dataset(dataset)
+    dataset_choice = st.sidebar.selectbox("Choose dataset", ["Training", "Evaluation", "Test", "All"], index=0)
 
-    # Pathology columns for this dataset (exclude ID and NL)
-    pathology_cols = [c for c in df.columns if c not in ("ID", "NL", "num_pathologies")]
+    if dataset_choice == "All":
+        df, pathology_cols = load_all_datasets()
+        img_prefix_for_row = df["img_prefix"]
+        dataset_for_row = df["dataset"]
+    else:
+        df, img_prefix, pathology_cols = load_single_dataset(dataset_choice)
+        img_prefix_for_row = None
+        dataset_for_row = None
 
+    # ----- Sidebar: quiz setup -----
     st.sidebar.header("Quiz setup")
     pap_mode = st.sidebar.checkbox("Papilledema (yes/no) mode", value=False, help="Binary quiz: ODE vs Normal")
 
@@ -273,7 +313,7 @@ def show_quiz():
     # ----- Build quiz pool depending on mode -----
     if pap_mode:
         if "ODE" not in df.columns:
-            st.error("Label 'ODE' (papilledema) not found in labels CSV.")
+            st.error("Label 'ODE' (papilledema) not found in labels CSV(s).")
             return
 
         ode_mask = df["ODE"] == 1
@@ -282,10 +322,10 @@ def show_quiz():
         df_quiz = df[pool_mask].copy()
 
         if df_quiz.empty:
-            st.warning("No images found for Papilledema vs Normal in this dataset.")
+            st.warning("No images found for Papilledema vs Normal in the selected dataset(s).")
             return
 
-        sig = current_filter_signature(dataset=dataset, pap_mode=pap_mode)
+        sig = current_filter_signature(dataset=dataset_choice, pap_mode=pap_mode)
         if "filter_signature" not in st.session_state or st.session_state.filter_signature != sig:
             st.session_state.filter_signature = sig
             st.session_state.current_index = random.choice(df_quiz.index)
@@ -304,7 +344,7 @@ def show_quiz():
                 st.session_state.current_index = random.choice(df_quiz.index)
                 st.session_state.revealed = False
         with col_top2:
-            st.write(f"**Dataset:** {dataset}  |  **Papilledema vs Normal**  |  **Pool size:** {len(df_quiz)}")
+            st.write(f"**Dataset:** {dataset_choice}  |  **Papilledema vs Normal**  |  **Pool size:** {len(df_quiz)}")
         with col_top3:
             if st.button("Reset score"):
                 st.session_state.score = 0
@@ -313,7 +353,9 @@ def show_quiz():
         # ----- Current item -----
         row = df_quiz.loc[st.session_state.current_index]
         image_id = normalize_id(row["ID"])
-        image_url = resolve_image_url(img_prefix, image_id)
+        prefix = row["img_prefix"] if dataset_choice == "All" else (img_prefix_for_row or img_prefix)
+        ds_name = row["dataset"] if dataset_choice == "All" else dataset_choice
+        image_url = resolve_image_url(prefix, image_id)
 
         try:
             buf = fetch_png(image_url)
@@ -322,8 +364,8 @@ def show_quiz():
             st.error(f"Failed to load image from S3 URL:\n{image_url}\n\n{e}")
             return
 
-        st.markdown(f"### 🖼️ Image ID: `{image_id}`")
-        st.image(im, caption=f"{dataset}: Papilledema — Yes or No?", use_container_width=True)
+        st.markdown(f"### 🖼️ {ds_name} • Image ID: `{image_id}`")
+        st.image(im, caption=f"{ds_name}: Papilledema — Yes or No?", use_container_width=True)
 
         # Ground truth for pap-mode
         is_pap = bool(row.get("ODE", 0) == 1)
@@ -331,7 +373,8 @@ def show_quiz():
         correct_codes_all = sorted(row_positive)
 
         # Binary answer UI
-        choice_key = f"pap_choice_{dataset}_{image_id}"
+        # Use a unique key combining dataset and id to avoid state clashes in "All"
+        choice_key = f"pap_choice_{ds_name}_{image_id}"
         user_choice = st.radio("Your answer:", ["Papilledema — Yes", "Papilledema — No"], index=None, key=choice_key)
 
         if st.button("Check"):
@@ -376,7 +419,7 @@ def show_quiz():
 
     # ----- State reset if filters change -----
     sig = current_filter_signature(
-        dataset=dataset,
+        dataset=dataset_choice,
         pap_mode=False,
         selected_categories=selected_categories,
         include_normals=include_normals,
@@ -401,8 +444,12 @@ def show_quiz():
             st.session_state.current_index = random.choice(df_quiz.index)
             st.session_state.revealed = False
     with col_top2:
+        if dataset_choice == "All":
+            ds_info = "All datasets"
+        else:
+            ds_info = dataset_choice
         cat_label = ', '.join(selected_categories) if selected_categories else '—'
-        st.write(f"**Dataset:** {dataset}  |  **Pool size:** {len(df_quiz)}  |  **Categories:** {cat_label}"
+        st.write(f"**Dataset:** {ds_info}  |  **Pool size:** {len(df_quiz)}  |  **Categories:** {cat_label}"
                  f"{'  |  + Normals' if include_normals else ''}")
     with col_top3:
         if st.button("Reset score"):
@@ -412,7 +459,9 @@ def show_quiz():
     # ----- Current item (S3 image load) -----
     row = df_quiz.loc[st.session_state.current_index]
     image_id = normalize_id(row["ID"])
-    image_url = resolve_image_url(img_prefix, image_id)
+    prefix = row["img_prefix"] if dataset_choice == "All" else (img_prefix_for_row or row.get("img_prefix", TRAIN_PREFIX))
+    ds_name = row["dataset"] if dataset_choice == "All" else dataset_choice
+    image_url = resolve_image_url(prefix, image_id)
 
     try:
         buf = fetch_png(image_url)
@@ -421,8 +470,8 @@ def show_quiz():
         st.error(f"Failed to load image from S3 URL:\n{image_url}\n\n{e}")
         return
 
-    st.markdown(f"### 🖼️ Image ID: `{image_id}`")
-    st.image(im, caption=f"{dataset}: Guess the pathology 👇", use_container_width=True)
+    st.markdown(f"### 🖼️ {ds_name} • Image ID: `{image_id}`")
+    st.image(im, caption=f"{ds_name}: Guess the pathology 👇", use_container_width=True)
 
     # ----- Determine correct labels for this row (restricted to selected set + NL if chosen) -----
     row_positive = [c for c in pathology_cols if row.get(c, 0) == 1]
@@ -431,10 +480,11 @@ def show_quiz():
         correct_codes = ["NL"]
 
     # ----- Modes -----
+    image_key = f"{ds_name}:{image_id}"  # unique across datasets
     if mc_mode:
-        options_codes = build_mc_options(image_id, correct_codes, selected_codes, num_choices)
+        options_codes = build_mc_options(image_key, correct_codes, selected_codes, num_choices)
         label_options = [label_map.get(c, c) for c in options_codes]
-        msel_key = f"msel_{dataset}_{image_id}_{num_choices}"
+        msel_key = f"msel_{ds_name}_{image_id}_{num_choices}"
         st.write("Select **all** that apply, then press **Check**.")
         user_choice_labels = st.multiselect("Your selection:", label_options, default=[], key=msel_key)
 

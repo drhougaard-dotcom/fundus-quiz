@@ -8,8 +8,8 @@ from PIL import Image
 import streamlit as st
 
 # ============ CONFIG (edit these paths to your local RFMiD data) ============
-IMAGE_DIR = "/Users/andershougaard/Documents/Training_Set/Training"
-LABELS_CSV = "/Users/andershougaard/Documents/Training_Set/RFMiD_Training_Labels.csv"
+IMAGE_DIR = "/Users/andershougaard/Documents/Fundusquiz/RFMiD/Training_Set/Training"
+LABELS_CSV = "/Users/andershougaard/Documents/Fundusquiz/RFMiD/Training_Set/RFMiD_Training_Labels.csv"
 
 # ============ LOAD DATA ============
 @st.cache_data(show_spinner=False)
@@ -304,3 +304,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

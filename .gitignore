@@ -1,0 +1,14 @@
+# macOS
+.DS_Store
+# Python
+__pycache__/
+.venv/
+# data / large assets
+RFMiD/
+Training/
+Training_Set/
+*.png
+*.jpg
+*.jpeg
+# keep a tiny demo folder if you want:
+!images_demo/*.png

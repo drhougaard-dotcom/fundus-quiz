@@ -39,16 +39,14 @@ LOCAL_LABELS_FALLBACK = "RFMiD_Training_Labels.csv"
 # ===================== STREAMLIT PAGE CONFIG =====================
 st.set_page_config(page_title="Fundus Pathology Quiz", layout="wide")
 
-# Disable fade/animations globally and style the Begin button only
+# Global CSS: remove fades, style small meta line, larger begin button
 st.markdown(
     """
     <style>
       * { transition: none !important; animation: none !important; }
-      /* larger "Begin Quiz" only when wrapped in .begin-btn */
+      .img-meta { font-size: 0.95rem; font-weight: 600; margin-top: 0.25rem; }
       .begin-btn .stButton > button {
-        font-size: 1.05rem;
-        padding: 0.75rem 1.2rem;
-        border-radius: 10px;
+        font-size: 1.05rem; padding: 0.75rem 1.2rem; border-radius: 10px;
       }
     </style>
     """,
@@ -138,6 +136,19 @@ def get_hero_image_url() -> Optional[str]:
         if prefix:
             return resolve_image_url(prefix, "1")
     return None
+
+# Exclude any "disease risk" style meta-labels from answers (esp. pap-mode)
+EXCLUDED_CODES = {"RISK", "DISEASE_RISK", "DRISK", "DISEASERISK"}
+def filter_display_codes(codes: List[str]) -> List[str]:
+    out: List[str] = []
+    for c in codes:
+        if c.upper() in EXCLUDED_CODES:
+            continue
+        label = label_map.get(c, c)
+        if "risk" in str(label).lower():
+            continue
+        out.append(c)
+    return out
 
 # ---------- Dataset utilities ----------
 DATASETS: Dict[str, Tuple[str, str]] = {
@@ -287,6 +298,7 @@ category_map = {
 # ===================== UI PAGES =====================
 def show_intro():
     st.title("Fundus Pathology Quiz")
+    st.caption("Version 1.0, October 2025")
     st.markdown(
         """
 **An online interactive quiz tool for fundus photo evaluation training.**
@@ -326,13 +338,13 @@ This quiz uses the **Retinal Fundus Multi-Disease Image Dataset (RFMiD)**.
 """
     )
 
-    # Logos: tighter row, no captions, custom heights, small gap
+    # Logos: tighter row, iPhone-friendly RegionH logo JPG, no captions
     st.markdown(
         """
-        <div style="display:flex; align-items:center; gap:10px; margin-top:6px;">
+        <div style="display:flex; align-items:center; gap:8px; margin-top:6px; flex-wrap: wrap;">
             <img src="https://designguide.ku.dk/download/co-branding/ku_logo_uk_h.png"
                  alt="University of Copenhagen" style="height:40px;">
-            <img src="https://www.regionh.dk/til-fagfolk/Om-Region-H/regionens-design/logo-og-grundelementer/logo-til-print-og-web/PublishingImages/Hospital_Maerke_RGB_A1_str.png"
+            <img src="https://www.regionh.dk/til-fagfolk/Om-Region-H/regionens-design/logo-og-grundelementer/logo-til-print-og-web/PublishingImages/Maerke_Hospital.jpg"
                  alt="The Capital Region of Denmark (Copenhagen University Hospital)" style="height:34px;">
         </div>
         """,
@@ -382,10 +394,21 @@ def show_quiz():
             st.warning("No images found for Papilledema vs Normal.")
             return
 
+        # Build lists for forced sampling ratio (≥1 pap per 5 normals)
+        pap_indices = df_quiz[df_quiz["ODE"] == 1].index.tolist()
+        nl_indices = df_quiz[df_quiz["NL"] == 1].index.tolist()
+
+        # Init / reset state
         sig = current_filter_signature(mode="pap")
         if "filter_signature" not in st.session_state or st.session_state.filter_signature != sig:
             st.session_state.filter_signature = sig
-            st.session_state.current_index = random.choice(df_quiz.index)
+            # Start from a pap image if possible to avoid long normal streaks up front
+            if pap_indices:
+                st.session_state.current_index = random.choice(pap_indices)
+                st.session_state.normals_since_last_pap = 0
+            else:
+                st.session_state.current_index = random.choice(df_quiz.index)
+                st.session_state.normals_since_last_pap = 0
             st.session_state.score = 0
             st.session_state.attempts = 0
             st.session_state.revealed = False
@@ -407,13 +430,14 @@ def show_quiz():
             return
 
         ds_name = row["dataset"]
-        st.markdown(f"### 🖼️ Image ID: `{image_id}` • Dataset: **{ds_name}**")
+        st.markdown(f"<div class='img-meta'>🖼️ Image ID: <code>{image_id}</code> • Dataset: <b>{ds_name}</b></div>", unsafe_allow_html=True)
         st.image(im, caption="Papilledema — Yes or No?", use_container_width=True)
 
         # Ground truth for pap-mode
         is_pap = bool(row.get("ODE", 0) == 1)
         row_positive = [c for c in pathology_cols if row.get(c, 0) == 1]
-        correct_codes_all = sorted(row_positive)
+        # Do not show any 'risk' style labels
+        correct_codes_all = sorted(filter_display_codes(row_positive))
 
         # Binary answer UI (side-by-side with Next)
         choice_key = f"pap_choice_{image_id}"
@@ -436,14 +460,29 @@ def show_quiz():
                     st.error("Not quite.")
                 st.session_state.revealed = True
 
-        if next_clicked:
-            st.session_state.current_index = random.choice(df_quiz.index)
-            st.session_state.revealed = False
-            st.rerun()
-
         if st.session_state.revealed:
             render_answer_pills(correct_codes_all)
             st.info(f"**Score:** {st.session_state.score} / {st.session_state.attempts}")
+
+        # Next selection with forced ratio
+        if next_clicked:
+            # Update normals streak based on *current* image
+            if is_pap:
+                st.session_state.normals_since_last_pap = 0
+            else:
+                st.session_state.normals_since_last_pap = st.session_state.get("normals_since_last_pap", 0) + 1
+
+            force_pap = st.session_state.normals_since_last_pap >= 4  # ensures ≥1 pap per 5 normals
+            if force_pap and pap_indices:
+                st.session_state.current_index = random.choice(pap_indices)
+                st.session_state.normals_since_last_pap = 0
+            else:
+                # Random from whole pool; if we land on pap, reset streak
+                st.session_state.current_index = random.choice(df_quiz.index)
+                nxt_is_pap = bool(df_quiz.loc[st.session_state.current_index].get("ODE", 0) == 1)
+                st.session_state.normals_since_last_pap = 0 if nxt_is_pap else st.session_state.normals_since_last_pap
+            st.session_state.revealed = False
+            st.rerun()
         return
 
     # ===== Normal multi-label / flashcard modes (pap_mode OFF) =====
@@ -497,7 +536,7 @@ def show_quiz():
         return
 
     ds_name = row["dataset"]
-    st.markdown(f"### 🖼️ Image ID: `{image_id}` • Dataset: **{ds_name}**")
+    st.markdown(f"<div class='img-meta'>🖼️ Image ID: <code>{image_id}</code> • Dataset: <b>{ds_name}</b></div>", unsafe_allow_html=True)
     st.image(im, caption="Guess the pathology 👇", use_container_width=True)
 
     # Determine correct labels for this row (restricted to selected set + NL if chosen)
@@ -505,6 +544,9 @@ def show_quiz():
     correct_codes = [c for c in row_positive if c in selected_codes]
     if include_normals and row.get("NL", 0) == 1:
         correct_codes = ["NL"]
+
+    # Filter out any 'risk' style labels (just in case)
+    correct_codes = filter_display_codes(correct_codes)
 
     if mc_mode:
         # Multiple-choice (multi-label)

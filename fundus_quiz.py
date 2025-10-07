@@ -422,7 +422,7 @@ def show_quiz():
     include_multi = st.sidebar.checkbox(
         "Include images with multiple pathological findings",
         value=True,
-        help="If off, only single-pathology images are included (NL unaffected).",
+        help="If off, only single-pathology images are included (normals unaffected).",
     )
 
     st.sidebar.markdown("---")

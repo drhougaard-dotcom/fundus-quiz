@@ -148,7 +148,6 @@ def fetch_image_as_data_uri(url: str, timeout: float = 8.0) -> Optional[str]:
         r.raise_for_status()
         content_type = r.headers.get("Content-Type", "")
         if not content_type.startswith("image/"):
-            # Try to guess from URL extension
             if url.lower().endswith(".png"):
                 content_type = "image/png"
             elif url.lower().endswith(".jpg") or url.lower().endswith(".jpeg"):
@@ -165,11 +164,8 @@ def get_regionh_logo_data_uri() -> Optional[str]:
     candidates = []
     if REGIONH_LOGO_URL:
         candidates.append(REGIONH_LOGO_URL)
-    # Your preferred iOS-friendly JPG
     candidates.append("https://www.regionh.dk/til-fagfolk/Om-Region-H/regionens-design/logo-og-grundelementer/logo-til-print-og-web/PublishingImages/Maerke_Hospital.jpg")
-    # Older PNG (some iOS had issues; we keep as fallback)
     candidates.append("https://www.regionh.dk/til-fagfolk/Om-Region-H/regionens-design/logo-og-grundelementer/logo-til-print-og-web/PublishingImages/Hospital_Maerke_RGB_A1_str.png")
-
     for url in candidates:
         data_uri = fetch_image_as_data_uri(url)
         if data_uri:
@@ -210,7 +206,7 @@ def _prepare_df(df_local: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
     if path_cols:
         df_local[path_cols] = (
             df_local[path_cols]
-            .apply(pd.to_numeric, errors="coerce")  # "0"/"1" -> 0/1; NaN -> 0
+            .apply(pd.to_numeric, errors="coerce")
             .fillna(0)
             .astype(int)
         )
@@ -361,7 +357,6 @@ annotated through adjudicated consensus of two senior retinal experts.
             st.rerun()
         st.markdown('</div>', unsafe_allow_html=True)
     else:
-        # Fallback: still show the button if image missing
         st.markdown('<div class="begin-btn">', unsafe_allow_html=True)
         if st.button("Begin Quiz", type="primary", key="begin_quiz_fallback"):
             st.session_state.quiz_started = True
@@ -380,14 +375,12 @@ This quiz uses the **Retinal Fundus Multi-Disease Image Dataset (RFMiD)**.
 """
     )
 
-    # Logos row: UCPH (direct), RegionH (embedded data URI for iOS reliability)
+    # Logos: UCPH + RegionH (RegionH embedded as data URI for reliability)
     regionh_data_uri = get_regionh_logo_data_uri()
     ucph_src = "https://designguide.ku.dk/download/co-branding/ku_logo_uk_h.png"
-
     logos_html = f"""
         <div style="display:flex; align-items:center; gap:8px; margin-top:6px; flex-wrap: wrap;">
-            <img src="{ucph_src}"
-                 alt="University of Copenhagen" style="height:40px;">
+            <img src="{ucph_src}" alt="University of Copenhagen" style="height:40px;">
             {"<img src='"+regionh_data_uri+"' alt='The Capital Region of Denmark (Copenhagen University Hospital)' style='height:34px;'>" if regionh_data_uri else ""}
         </div>
     """
@@ -401,7 +394,11 @@ def show_quiz():
 
     # ----- Sidebar: quiz setup -----
     st.sidebar.header("Quiz setup")
-    pap_mode = st.sidebar.checkbox("Papilledema (yes/no) mode", value=False, help="Binary quiz: Papiledema vs Normal")
+    pap_mode = st.sidebar.checkbox(
+        "Papilledema (yes/no) mode",
+        value=False,
+        help="Binary quiz: Papilledema vs Normal",
+    )
 
     default_categories = [
         "Diabetic retinopathy",
@@ -415,7 +412,18 @@ def show_quiz():
         default=default_categories,
         disabled=pap_mode
     )
-    include_normals = st.sidebar.checkbox("Include normals in pool", value=False, disabled=pap_mode)
+    include_normals = st.sidebar.checkbox(
+        "Include normals in pool",
+        value=False,
+        disabled=pap_mode
+    )
+
+    # NEW: include multiple-pathology images toggle
+    include_multi = st.sidebar.checkbox(
+        "Include images with multiple pathological findings",
+        value=True,
+        help="If off, only single-pathology images are included (NL unaffected).",
+    )
 
     st.sidebar.markdown("---")
     mc_mode = st.sidebar.checkbox("Multiple-choice mode (multi-label)", value=True, disabled=pap_mode)
@@ -427,13 +435,21 @@ def show_quiz():
             st.error("Label 'ODE' (papilledema) not found in labels CSV(s).")
             return
 
+        # Base pool: pap OR normals
         ode_mask = df["ODE"] == 1
         nl_mask = df["NL"] == 1
-        pool_mask = ode_mask | nl_mask
+
+        # If multi not included, restrict pap images to single-pathology (but keep normals)
+        if include_multi:
+            pap_mask_final = ode_mask
+        else:
+            pap_mask_final = ode_mask & (df["num_pathologies"] == 1)
+
+        pool_mask = pap_mask_final | nl_mask
         df_quiz = df[pool_mask].copy()
 
         if df_quiz.empty:
-            st.warning("No images found for Papilledema vs Normal.")
+            st.warning("No images found for Papilledema vs Normal with the current filters.")
             return
 
         # Build lists for forced sampling ratio (≥1 pap per 5 normals)
@@ -441,10 +457,9 @@ def show_quiz():
         nl_indices = df_quiz[df_quiz["NL"] == 1].index.tolist()
 
         # Init / reset state
-        sig = current_filter_signature(mode="pap")
+        sig = current_filter_signature(mode="pap", include_multi=include_multi)
         if "filter_signature" not in st.session_state or st.session_state.filter_signature != sig:
             st.session_state.filter_signature = sig
-            # Start from a pap image if possible to avoid long normal streaks up front
             if pap_indices:
                 st.session_state.current_index = random.choice(pap_indices)
                 st.session_state.normals_since_last_pap = 0
@@ -478,7 +493,6 @@ def show_quiz():
         # Ground truth for pap-mode
         is_pap = bool(row.get("ODE", 0) == 1)
         row_positive = [c for c in pathology_cols if row.get(c, 0) == 1]
-        # Do not show any 'risk' style labels
         correct_codes_all = sorted(filter_display_codes(row_positive))
 
         # Binary answer UI (side-by-side with Next)
@@ -508,7 +522,6 @@ def show_quiz():
 
         # Next selection with forced ratio
         if next_clicked:
-            # Update normals streak based on *current* image
             if is_pap:
                 st.session_state.normals_since_last_pap = 0
             else:
@@ -519,7 +532,6 @@ def show_quiz():
                 st.session_state.current_index = random.choice(pap_indices)
                 st.session_state.normals_since_last_pap = 0
             else:
-                # Random from whole pool; if we land on pap, reset streak
                 st.session_state.current_index = random.choice(df_quiz.index)
                 nxt_is_pap = bool(df_quiz.loc[st.session_state.current_index].get("ODE", 0) == 1)
                 st.session_state.normals_since_last_pap = 0 if nxt_is_pap else st.session_state.normals_since_last_pap
@@ -543,14 +555,19 @@ def show_quiz():
     pool_mask = path_mask | nl_mask
     df_quiz = df[pool_mask].copy()
 
+    # If multiple-pathology images are excluded, keep NL and single-pathology only
+    if not include_multi:
+        df_quiz = df_quiz[(df_quiz["NL"] == 1) | (df_quiz["num_pathologies"] == 1)].copy()
+
     if df_quiz.empty:
-        st.warning("No images match the current selection. Try adding categories or enabling normals.")
+        st.warning("No images match the current selection. Try enabling multiple findings or adding categories.")
         return
 
     sig = current_filter_signature(
         mode="multi",
         selected_categories=selected_categories,
         include_normals=include_normals,
+        include_multi=include_multi,
         mc_mode=mc_mode,
         num_choices=num_choices,
     )

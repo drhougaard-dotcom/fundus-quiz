@@ -1,6 +1,7 @@
 # fundus_quiz.py
 import os
 import io
+import base64
 import random
 from typing import List, Tuple, Dict, Optional
 
@@ -35,6 +36,9 @@ TEST_LABELS_CSV_URL  = _secret("TEST_LABELS_CSV_URL",  "")
 
 # Optional tiny local fallback (demo)
 LOCAL_LABELS_FALLBACK = "RFMiD_Training_Labels.csv"
+
+# Optional explicit logo override (recommended: upload logo to your S3 and put the URL here)
+REGIONH_LOGO_URL = _secret("REGIONH_LOGO_URL", "")
 
 # ===================== STREAMLIT PAGE CONFIG =====================
 st.set_page_config(page_title="Fundus Pathology Quiz", layout="wide")
@@ -137,12 +141,50 @@ def get_hero_image_url() -> Optional[str]:
             return resolve_image_url(prefix, "1")
     return None
 
+def fetch_image_as_data_uri(url: str, timeout: float = 8.0) -> Optional[str]:
+    """Fetch an image URL and return a data: URI for robust inline display (helps on iOS)."""
+    try:
+        r = requests.get(url, timeout=timeout)
+        r.raise_for_status()
+        content_type = r.headers.get("Content-Type", "")
+        if not content_type.startswith("image/"):
+            # Try to guess from URL extension
+            if url.lower().endswith(".png"):
+                content_type = "image/png"
+            elif url.lower().endswith(".jpg") or url.lower().endswith(".jpeg"):
+                content_type = "image/jpeg"
+            else:
+                content_type = "image/png"
+        b64 = base64.b64encode(r.content).decode("ascii")
+        return f"data:{content_type};base64,{b64}"
+    except Exception:
+        return None
+
+def get_regionh_logo_data_uri() -> Optional[str]:
+    """Try S3 override first, then JPG fallback, then PNG fallback. Return a data URI if any works."""
+    candidates = []
+    if REGIONH_LOGO_URL:
+        candidates.append(REGIONH_LOGO_URL)
+    # Your preferred iOS-friendly JPG
+    candidates.append("https://www.regionh.dk/til-fagfolk/Om-Region-H/regionens-design/logo-og-grundelementer/logo-til-print-og-web/PublishingImages/Maerke_Hospital.jpg")
+    # Older PNG (some iOS had issues; we keep as fallback)
+    candidates.append("https://www.regionh.dk/til-fagfolk/Om-Region-H/regionens-design/logo-og-grundelementer/logo-til-print-og-web/PublishingImages/Hospital_Maerke_RGB_A1_str.png")
+
+    for url in candidates:
+        data_uri = fetch_image_as_data_uri(url)
+        if data_uri:
+            return data_uri
+    return None
+
 # Exclude any "disease risk" style meta-labels from answers (esp. pap-mode)
 EXCLUDED_CODES = {"RISK", "DISEASE_RISK", "DRISK", "DISEASERISK"}
 def filter_display_codes(codes: List[str]) -> List[str]:
     out: List[str] = []
     for c in codes:
-        if c.upper() in EXCLUDED_CODES:
+        if c is None:
+            continue
+        cu = str(c).upper()
+        if cu in EXCLUDED_CODES:
             continue
         label = label_map.get(c, c)
         if "risk" in str(label).lower():
@@ -338,18 +380,18 @@ This quiz uses the **Retinal Fundus Multi-Disease Image Dataset (RFMiD)**.
 """
     )
 
-    # Logos: tighter row, iPhone-friendly RegionH logo JPG, no captions
-    st.markdown(
-        """
+    # Logos row: UCPH (direct), RegionH (embedded data URI for iOS reliability)
+    regionh_data_uri = get_regionh_logo_data_uri()
+    ucph_src = "https://designguide.ku.dk/download/co-branding/ku_logo_uk_h.png"
+
+    logos_html = f"""
         <div style="display:flex; align-items:center; gap:8px; margin-top:6px; flex-wrap: wrap;">
-            <img src="https://designguide.ku.dk/download/co-branding/ku_logo_uk_h.png"
+            <img src="{ucph_src}"
                  alt="University of Copenhagen" style="height:40px;">
-            <img src="https://www.regionh.dk/til-fagfolk/Om-Region-H/regionens-design/logo-og-grundelementer/logo-til-print-og-web/PublishingImages/Maerke_Hospital.jpg"
-                 alt="The Capital Region of Denmark (Copenhagen University Hospital)" style="height:34px;">
+            {"<img src='"+regionh_data_uri+"' alt='The Capital Region of Denmark (Copenhagen University Hospital)' style='height:34px;'>" if regionh_data_uri else ""}
         </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    """
+    st.markdown(logos_html, unsafe_allow_html=True)
 
     st.markdown("---")
 

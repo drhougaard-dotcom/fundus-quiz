@@ -401,7 +401,7 @@ def show_quiz():
 
     # ----- Sidebar: quiz setup -----
     st.sidebar.header("Quiz setup")
-    pap_mode = st.sidebar.checkbox("Papilledema (yes/no) mode", value=False, help="Binary quiz: ODE vs Normal")
+    pap_mode = st.sidebar.checkbox("Papilledema (yes/no) mode", value=False, help="Binary quiz: Papiledema vs Normal")
 
     default_categories = [
         "Diabetic retinopathy",

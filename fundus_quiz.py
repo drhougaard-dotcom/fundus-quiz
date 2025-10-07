@@ -415,7 +415,7 @@ def show_quiz():
         default=default_categories,
         disabled=pap_mode
     )
-    include_normals = st.sidebar.checkbox("Include normals (NL) in pool", value=False, disabled=pap_mode)
+    include_normals = st.sidebar.checkbox("Include normals in pool", value=False, disabled=pap_mode)
 
     st.sidebar.markdown("---")
     mc_mode = st.sidebar.checkbox("Multiple-choice mode (multi-label)", value=True, disabled=pap_mode)

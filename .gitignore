@@ -16,6 +16,6 @@ Test_Set/
 *.jpg
 *.jpeg
 
-# allow a tiny demo if you ever add one
+# allow a tiny demo
 !images_demo/*.png
 !images_demo/*.jpg
